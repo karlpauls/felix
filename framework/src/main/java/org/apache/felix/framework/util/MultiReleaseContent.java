@@ -162,6 +162,11 @@ public class MultiReleaseContent implements Content
         return m_content.getEntryAsURL(findPath(name));
     }
 
+    public Content getWrappedContent()
+    {
+        return m_content;
+    }
+
     private String findPath(String path)
     {
         String internalPath = path;

@@ -24,7 +24,7 @@ import java.net.*;
 /**
  * This class implements a fake stream handler. This class is necessary in
  * some cases when assigning <tt>CodeSource</tt>s to classes in
- * <tt>BundleClassLoader</tt>. In general, the bundle location is an URL
+ * <tt>BundleClassLoaderImpl</tt>. In general, the bundle location is an URL
  * and this URL is used as the code source for the bundle's associated
  * classes. The OSGi specification does not require that the bundle
  * location be an URL, though, so in that case we try to generate a

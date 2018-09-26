@@ -18,11 +18,14 @@
  */
 package org.apache.felix.framework;
 
+import dalvik.system.PathClassLoader;
 import org.apache.felix.framework.cache.Content;
+import org.apache.felix.framework.cache.JarContent;
 import org.apache.felix.framework.capabilityset.SimpleFilter;
 import org.apache.felix.framework.resolver.ResourceNotFoundException;
 import org.apache.felix.framework.util.CompoundEnumeration;
 import org.apache.felix.framework.util.FelixConstants;
+import org.apache.felix.framework.util.MultiReleaseContent;
 import org.apache.felix.framework.util.SecurityManagerEx;
 import org.apache.felix.framework.util.Util;
 import org.apache.felix.framework.util.manifestparser.ManifestParser;
@@ -52,6 +55,7 @@ import org.osgi.resource.Requirement;
 import org.osgi.resource.Wire;
 import org.osgi.service.resolver.ResolutionException;
 
+import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.net.MalformedURLException;
@@ -113,7 +117,7 @@ public class BundleWiringImpl implements BundleWiring
 
     private volatile List<BundleRequirement> m_wovenReqs = null;
 
-    private volatile BundleClassLoader m_classLoader;
+    private volatile ClassLoader m_classLoader;
 
     // Bundle-specific class loader for boot delegation.
     private final ClassLoader m_bootClassLoader;
@@ -172,6 +176,8 @@ public class BundleWiringImpl implements BundleWiring
 
     private volatile ConcurrentHashMap<String, ClassLoader> m_accessorLookupCache;
 
+    private boolean m_noDex;
+
     BundleWiringImpl(
         Logger logger, Map configMap, StatefulResolver resolver,
         BundleRevisionImpl revision, List<BundleRevision> fragments,
@@ -186,6 +192,7 @@ public class BundleWiringImpl implements BundleWiring
         m_importedPkgs = importedPkgs;
         m_requiredPkgs = requiredPkgs;
         m_wires =  Util.newImmutableList(wires);
+        m_noDex = !"true".equalsIgnoreCase((String) m_configMap.get(FelixConstants.FELIX_REQUIRE_DEX_PROPERTY));
 
         // We need to sort the fragments and add ourself as a dependent of each one.
         // We also need to create an array of fragment contents to attach to our
@@ -728,12 +735,13 @@ public class BundleWiringImpl implements BundleWiring
         if (!m_isDisposed && (m_classLoader == null))
         {
             m_classLoader = BundleRevisionImpl.getSecureAction().run(
-                new PrivilegedAction<BundleClassLoader>()
+                new PrivilegedAction<ClassLoader>()
                 {
                     @Override
-                    public BundleClassLoader run()
+                    public ClassLoader run()
                     {
-                        return new BundleClassLoader(BundleWiringImpl.this, determineParentClassLoader(), m_logger);
+                        return m_noDex ? new BundleClassLoaderImpl(BundleWiringImpl.this, determineParentClassLoader(), m_logger) :
+                            new BundleClassLoaderDalvik(BundleWiringImpl.this, determineParentClassLoader(), m_logger);
                     }
                 }
             );
@@ -1513,7 +1521,7 @@ public class BundleWiringImpl implements BundleWiring
                                 result = bundleClassLoader.findLoadedClassInternal(name);
                                 if (result != null)
                                 {
-                                    m_accessorLookupCache.put(name, bundleClassLoader);
+                                    m_accessorLookupCache.put(name, (ClassLoader) bundleClassLoader);
                                     return result;
                                 }
                             }
@@ -1916,7 +1924,257 @@ public class BundleWiringImpl implements BundleWiring
         }
     }
 
-    public static class BundleClassLoader extends SecureClassLoader implements BundleReference
+    interface BundleClassLoader {
+        boolean isActivationTriggered();
+
+        Class findLoadedClassInternal(String name);
+
+        Class findClass(String name) throws ClassNotFoundException;
+    }
+
+    public static class BundleClassLoaderDalvik extends PathClassLoader implements BundleReference, BundleClassLoader
+    {
+        // Flag used to determine if a class has been loaded from this class
+        // loader or not.
+        private volatile boolean m_isActivationTriggered = false;
+        private final BundleWiringImpl m_wiring;
+        private final Logger m_logger;
+
+        public BundleClassLoaderDalvik(BundleWiringImpl wiring, ClassLoader parent, Logger logger)
+        {
+            super(calculateDexPath(wiring), calculateLibraryPath(wiring), parent);
+            m_wiring = wiring;
+            m_logger = logger;
+        }
+
+        private static String calculateDexPath(BundleWiringImpl wiring)
+        {
+            List<String> paths = new ArrayList<String>();
+            List<Content> contentPath = wiring.m_revision.getContentPath();
+            for (Content content : contentPath) {
+                if (content instanceof MultiReleaseContent)
+                {
+                    content = ((MultiReleaseContent) content).getWrappedContent();
+                }
+                if (content instanceof JarContent)
+                {
+                    paths.add(((JarContent) content).getFile().getAbsolutePath());
+                }
+            }
+            String path;
+            if (paths.isEmpty()) {
+                path = null;
+            }
+            else if (paths.size() == 1) {
+                path = paths.get(0);
+            }
+            else {
+                path = paths.get(0);
+                for (int i = 1; i < paths.size();i++) {
+                    path += File.pathSeparator + paths.get(i);
+                }
+            }
+            return path;
+        }
+
+        private static String calculateLibraryPath(BundleWiringImpl wiring)
+        {
+            List<NativeLibrary> libs = wiring.getNativeLibraries();
+            List<String> paths = new ArrayList<String>();
+            for (int libIdx = 0; (libs != null) && (libIdx < libs.size()); libIdx++)
+            {
+                // Search bundle content first for native library.
+                String result = wiring.m_revision.getContent().getEntryAsNativeLibrary(
+                    libs.get(libIdx).getEntryName());
+                // If not found, then search fragments in order.
+                for (int i = 0;
+                     (result == null) && (wiring.m_fragmentContents != null)
+                         && (i < wiring.m_fragmentContents.size());
+                     i++)
+                {
+                    result = wiring.m_fragmentContents.get(i).getEntryAsNativeLibrary(
+                        libs.get(libIdx).getEntryName());
+                }
+                if (result != null) {
+                    paths.add(result);
+                }
+            }
+            String nativePath;
+            if (paths.isEmpty()) {
+                nativePath = null;
+            }
+            else if (paths.size() == 1) {
+                nativePath = paths.get(0);
+            }
+            else {
+                nativePath = paths.get(0);
+                for (int i = 1; i < paths.size();i++) {
+                    nativePath += File.pathSeparator + paths.get(i);
+                }
+            }
+            return nativePath;
+        }
+
+        @Override
+        public boolean isActivationTriggered()
+        {
+            return m_isActivationTriggered;
+        }
+
+        @Override
+        public Class findLoadedClassInternal(String name)
+        {
+            return findLoadedClass(name);
+        }
+
+        @Override
+        public Bundle getBundle()
+        {
+            return m_wiring.getBundle();
+        }
+
+        @Override
+        protected Class loadClass(String name, boolean resolve)
+            throws ClassNotFoundException
+        {
+            Class clazz = findLoadedClass(name);
+
+            if (clazz == null)
+            {
+                try
+                {
+                    clazz = (Class) m_wiring.findClassOrResourceByDelegation(name, true);
+                }
+                catch (ResourceNotFoundException ex)
+                {
+                    // This should never happen since we are asking for a class,
+                    // so just ignore it.
+                }
+                catch (ClassNotFoundException cnfe)
+                {
+                    ClassNotFoundException ex = cnfe;
+                    if (m_logger.getLogLevel() >= Logger.LOG_DEBUG)
+                    {
+                        String msg = diagnoseClassLoadError(m_wiring.m_resolver, m_wiring.m_revision, name);
+                        ex = (msg != null)
+                            ? new ClassNotFoundException(msg, cnfe)
+                            : ex;
+                    }
+                    throw ex;
+                }
+                if (clazz == null)
+                {
+                    // We detected a cycle
+                    throw new ClassNotFoundException("Cycle detected while trying to load class: " + name);
+                }
+            }
+
+            // Resolve the class and return it.
+            if (resolve)
+            {
+                resolveClass(clazz);
+            }
+            return clazz;
+        }
+
+        @Override
+        public Class<?> findClass(String name) throws ClassNotFoundException
+        {
+            Class clazz = findLoadedClass(name);
+
+            // Search for class in bundle revision.
+            if (clazz == null)
+            {
+                // Do a quick check to try to avoid searching for classes on a
+                // disposed class loader, which will avoid some odd exception.
+                // This won't prevent all weird exception, since the wiring could
+                // still get disposed of after this check, but it will prevent
+                // some, perhaps.
+                if (m_wiring.m_isDisposed)
+                {
+                    throw new ClassNotFoundException(
+                        "Unable to load class '"
+                            + name
+                            + "' because the bundle wiring for "
+                            + m_wiring.m_revision.getSymbolicName()
+                            + " is no longer valid.");
+                }
+                clazz = super.findClass(name);
+                // Perform deferred activation without holding the class loader lock,
+                // if the class we are returning is the instigating class.
+                List deferredList = (List) m_deferredActivation.get();
+                if ((deferredList != null)
+                    && (deferredList.size() > 0)
+                    && ((Object[]) deferredList.get(0))[0].equals(name))
+                {
+                    // Null the deferred list.
+                    m_deferredActivation.set(null);
+                    while (!deferredList.isEmpty())
+                    {
+                        // Lazy bundles should be activated in the reverse order
+                        // of when they were added to the deferred list, so grab
+                        // them from the end of the deferred list.
+                        Object[] lazy = (Object[]) deferredList.remove(deferredList.size() - 1);
+                        try
+                        {
+                            m_wiring.m_revision.getBundle().getFramework().getFramework()
+                                .activateBundle((BundleImpl) (lazy)[1], true);
+                        }
+                        catch (Throwable ex)
+                        {
+                            m_logger.log((BundleImpl) (lazy)[1],
+                                Logger.LOG_WARNING,
+                                "Unable to lazily start bundle.",
+                                ex);
+                        }
+                    }
+                }
+            }
+            return clazz;
+        }
+
+        @Override
+        public URL getResource(String name)
+        {
+            URL url = m_wiring.getResourceByDelegation(name);
+            if (m_wiring.m_useLocalURLs)
+            {
+                url = convertToLocalUrl(url);
+            }
+            return url;
+        }
+
+        @Override
+        protected URL findResource(String name)
+        {
+            return m_wiring.m_revision.getResourceLocal(name);
+        }
+
+        @Override
+        protected Enumeration findResources(String name)
+        {
+            return m_wiring.m_revision.getResourcesLocal(name);
+        }
+
+        @Override
+        public Enumeration getResources(String name)
+        {
+            Enumeration urls = m_wiring.getResourcesByDelegation(name);
+            if (m_wiring.m_useLocalURLs)
+            {
+                urls = new ToLocalUrlEnumeration(urls);
+            }
+            return urls;
+        }
+
+        @Override
+        public String toString()
+        {
+            return m_wiring.toString();
+        }
+    }
+
+    public static class BundleClassLoaderImpl extends SecureClassLoader implements BundleReference, BundleClassLoader
     {
         static final boolean m_isParallel;
 
@@ -1951,7 +2209,7 @@ public class BundleWiringImpl implements BundleWiring
         private final BundleWiringImpl m_wiring;
         private final Logger m_logger;
 
-        public BundleClassLoader(BundleWiringImpl wiring, ClassLoader parent, Logger logger)
+        public BundleClassLoaderImpl(BundleWiringImpl wiring, ClassLoader parent, Logger logger)
         {
             super(parent);
             m_wiring = wiring;
@@ -2014,7 +2272,7 @@ public class BundleWiringImpl implements BundleWiring
         }
 
         @Override
-        protected Class findClass(String name) throws ClassNotFoundException
+        public Class findClass(String name) throws ClassNotFoundException
         {
             Class clazz = findLoadedClass(name);
 
@@ -2567,7 +2825,7 @@ public class BundleWiringImpl implements BundleWiring
             return m_wiring.toString();
         }
 
-        Class<?> findLoadedClassInternal(String name)
+        public Class<?> findLoadedClassInternal(String name)
         {
             return super.findLoadedClass(name);
         }
@@ -2795,7 +3053,7 @@ public class BundleWiringImpl implements BundleWiring
             try
             {
                 BundleRevisionImpl.getSecureAction()
-                .getClassLoader(BundleClassLoader.class).loadClass(name);
+                .getClassLoader(BundleClassLoaderImpl.class).loadClass(name);
                 classpath = true;
             }
             catch (NoClassDefFoundError err)
@@ -2849,7 +3107,7 @@ public class BundleWiringImpl implements BundleWiring
         try
         {
             BundleRevisionImpl.getSecureAction()
-            .getClassLoader(BundleClassLoader.class).loadClass(name);
+            .getClassLoader(BundleClassLoaderImpl.class).loadClass(name);
 
             StringBuilder sb = new StringBuilder("*** Package '");
             sb.append(pkgName);

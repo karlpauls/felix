@@ -18,9 +18,8 @@
  */
 package org.apache.felix.framework;
 
-import org.apache.felix.framework.BundleWiringImpl.BundleClassLoader;
+import org.apache.felix.framework.BundleWiringImpl.BundleClassLoaderImpl;
 import org.apache.felix.framework.cache.Content;
-import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
@@ -57,9 +56,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -110,8 +107,8 @@ public class BundleWiringImplTest
     public void testBundleClassLoader() throws Exception
     {
         bundleWiring = mock(BundleWiringImpl.class);
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
     }
 
@@ -121,8 +118,8 @@ public class BundleWiringImplTest
     {
         initializeSimpleBundleWiring();
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleWiringImpl.BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleWiringImpl.BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
         Class foundClass = null;
         try
@@ -160,8 +157,8 @@ public class BundleWiringImplTest
         when(mockContent.getEntryAsBytes(testClassAsPath)).thenReturn(
                 testClassBytes);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleWiringImpl.BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
         Class foundClass = null;
         try
@@ -223,8 +220,8 @@ public class BundleWiringImplTest
                         mockServiceReferenceWovenClassListener, false))
         .thenReturn(dummyWovenClassListener);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleWiringImpl.BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
         Class foundClass = null;
         try
@@ -295,8 +292,8 @@ public class BundleWiringImplTest
                         mockServiceReferenceWovenClassListener, false))
         .thenReturn(dummyWovenClassListener);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleWiringImpl.BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleWiringImpl.BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
 
         try
@@ -366,8 +363,8 @@ public class BundleWiringImplTest
                         mockServiceReferenceWovenClassListener, false))
         .thenReturn(dummyWovenClassListener);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
         try
         {
@@ -407,8 +404,8 @@ public class BundleWiringImplTest
 
         when(bundleWiring.getBundle().getFramework()).thenReturn(mockFramework);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleWiringImpl.BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleWiringImpl.BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
 
         try {
@@ -464,8 +461,8 @@ public class BundleWiringImplTest
 
         when(bundleWiring.getBundle().getFramework()).thenReturn(mockFramework);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleWiringImpl.BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
 
         try {
@@ -505,8 +502,8 @@ public class BundleWiringImplTest
 
         when(bundleWiring.getBundle().getFramework()).thenReturn(mockFramework);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleWiringImpl.BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleWiringImpl.BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
 
         //first attempt to populate the cache
@@ -544,7 +541,7 @@ public class BundleWiringImplTest
         }
     }
 
-    private BundleRevision getBundleRevision(String classToBeLoaded, BundleClassLoader pkgBundleClassLoader, Object value) throws ClassNotFoundException {
+    private BundleRevision getBundleRevision(String classToBeLoaded, BundleWiringImpl.BundleClassLoaderImpl pkgBundleClassLoader, Object value) throws ClassNotFoundException {
         BundleRevision bundleRevision = mock(BundleRevision.class);
         BundleWiring pkgBundleWiring = mock(BundleWiring.class);
         when(pkgBundleClassLoader.findLoadedClassInternal(classToBeLoaded)).thenAnswer(createAnswer(value));
@@ -565,8 +562,8 @@ public class BundleWiringImplTest
         when(mockFramework.getBootPackages()).thenReturn(new String[0]);
 
         Map<String, BundleRevision> importedPkgs = mock(Map.class);
-        BundleClassLoader foundClassLoader = mock(BundleClassLoader.class);
-        BundleClassLoader notFoundClassLoader = mock(BundleClassLoader.class);
+        BundleWiringImpl.BundleClassLoaderImpl foundClassLoader = mock(BundleClassLoaderImpl.class);
+        BundleClassLoaderImpl notFoundClassLoader = mock(BundleWiringImpl.BundleClassLoaderImpl.class);
         BundleRevision bundleRevision1 = getBundleRevision(classToBeLoaded, foundClassLoader, String.class);
         BundleRevision bundleRevision2 = getBundleRevision(classToBeLoaded, notFoundClassLoader, null);
         Map<String, BundleRevision> importedPkgsActual = new LinkedHashMap<String, BundleRevision>();
@@ -579,8 +576,8 @@ public class BundleWiringImplTest
 
         when(bundleWiring.getBundle().getFramework()).thenReturn(mockFramework);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleWiringImpl.BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleWiringImpl.BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
 
         //call class load to populate the cache
@@ -642,8 +639,8 @@ public class BundleWiringImplTest
         field.setAccessible(true);
         field.set(bundleWiring, bootDelegateClassLoader);
 
-        BundleClassLoader bundleClassLoader = createBundleClassLoader(
-                BundleClassLoader.class, bundleWiring);
+        BundleClassLoaderImpl bundleClassLoader = createBundleClassLoader(
+                BundleClassLoaderImpl.class, bundleWiring);
         assertNotNull(bundleClassLoader);
 
         try {
@@ -1023,7 +1020,7 @@ public class BundleWiringImplTest
         assertEquals(1, loaded3.get());
     }
 
-    private static class TestBundleClassLoader extends BundleClassLoader
+    private static class TestBundleClassLoader extends BundleClassLoaderImpl
     {
         static {
             ClassLoader.registerAsParallelCapable();
@@ -1046,7 +1043,7 @@ public class BundleWiringImplTest
         }
 
         @Override
-        protected Class findClass(String name) throws ClassNotFoundException
+        public Class findClass(String name) throws ClassNotFoundException
         {
             if (name.startsWith("java"))
             {
@@ -1060,7 +1057,7 @@ public class BundleWiringImplTest
         }
     }
 
-    private static class TestBundleClassLoader2 extends BundleClassLoader
+    private static class TestBundleClassLoader2 extends BundleWiringImpl.BundleClassLoaderImpl
     {
         Semaphore m_gate = new Semaphore(0);
         public TestBundleClassLoader2(BundleWiringImpl wiring, ClassLoader parent, Logger logger)
@@ -1079,7 +1076,7 @@ public class BundleWiringImplTest
         }
 
         @Override
-        protected Class findClass(String name) throws ClassNotFoundException
+        public Class findClass(String name) throws ClassNotFoundException
         {
             if (name.startsWith("java"))
             {

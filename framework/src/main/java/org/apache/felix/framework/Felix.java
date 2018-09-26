@@ -4880,6 +4880,10 @@ public class Felix extends BundleImpl implements Framework
             m_configMutableMap.put(FelixConstants.FRAMEWORK_LANGUAGE,
                 System.getProperty("user.language"));
         }
+        if (!m_configMutableMap.containsKey(FelixConstants.FELIX_REQUIRE_DEX_PROPERTY)) {
+            m_configMutableMap.put(FelixConstants.FELIX_REQUIRE_DEX_PROPERTY,
+                "Dalvik".equals(System.getProperty("java.vm.name")) ? "true" : "false");
+        }
         m_configMutableMap.put(
             FelixConstants.FELIX_VERSION_PROPERTY, getFrameworkVersion());
 
