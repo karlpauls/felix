@@ -26,9 +26,13 @@ import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSessionAttributeListener;
 import javax.servlet.http.HttpSessionListener;
 
+import org.apache.felix.http.base.internal.HttpConfig;
+
 public interface ExtServletContext extends ServletContext
 {
     boolean handleSecurity(HttpServletRequest req, HttpServletResponse res) throws IOException;
+
+    void finishSecurity(HttpServletRequest req, HttpServletResponse res);
 
     HttpSessionAttributeListener getHttpSessionAttributeListener();
 
@@ -37,4 +41,6 @@ public interface ExtServletContext extends ServletContext
     ServletRequestListener getServletRequestListener();
 
     ServletRequestAttributeListener getServletRequestAttributeListener();
+
+    HttpConfig getConfig();
 }

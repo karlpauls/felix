@@ -26,61 +26,77 @@ import java.util.Collection;
 import java.util.Dictionary;
 import java.util.Map;
 
-
 /**
- * Annotates a method for injecting a Configuration Dependency. A configuration dependency 
+ * Annotates a method for injecting a Configuration Dependency. 
+ * 
+ * <p> A configuration dependency 
  * is required by default, and allows you to depend on the availability of a valid configuration 
  * for your component. This dependency requires the OSGi Configuration Admin Service.
  * 
+ * Configuration Dependency callback is always invoked before any service dependency callbacks, and before init/start callbacks.
+ * 
  * The annotation can be applied on a callback method which accepts the following parameters:
  * 
- * <p><ul>
+ * <ul>
  * <li>callback(Dictionary) 
  * <li>callback(Component, Dictionary) 
- * <li>callback(Configuration interface) // type safe configuration
- * <li>callback(Component, Configuration interface) // type safe configuration
+ * <li>callback(Component, Configuration ... configTypes) // type safe configuration interface(s)
+ * <li>callback(Configuration ... configTypes) // type safe configuration interface(s)
+ * <li>callback(Dictionary, Configuration ... configTypes) // type safe configuration interfaces(s)
+ * <li>callback(Component, Dictionary, Configuration ... configTypes) // type safe configuration interfaces(s)
  * </ul>
  * 
  * <h3>Usage Examples</h3>
  * 
- * <p> In the following example, the "Printer" component depends on a configuration
- * whose PID name is "sample.PrinterConfiguration". This service will initialize
+ * <p> In the following example, the Printer components depends on a configuration
+ * whose PID name is "sample.Printer". This service will initialize
  * its ip/port number from the provided configuration.
- * 
- * <p> First, we define the configuration metadata, using standard bndtools metatatype annotations 
- * (see http://www.aqute.biz/Bnd/MetaType):
  * 
  * <blockquote>
  * <pre>
+ *
  * package sample;
- * import aQute.bnd.annotation.metatype.Meta.AD;
- * import aQute.bnd.annotation.metatype.Meta.OCD;
- *
- * &#64;OCD(description = "Declare here the Printer Configuration.")
- * public interface PrinterConfiguration {
- *     &#64;AD(description = "Enter the printer ip address")
- *     String ipAddress();
- *
- *     &#64;AD(description = "Enter the printer address port number.")
- *     default int portNumber() { return 8080; }
+ * 
+ * &#64;Component
+ * public class Printer {
+ *     &#64;ConfigurationDependency(propagate=true) // Will use the fqdn of the  Printer interface as the pid.
+ *     void updated(Dictionary cnf) {
+ *         if (cnf != null) {
+ *             String ip = cnf.get("address");
+ *             int port = Integer.parseInt(cnf.get("port"));
+ *         }
+ *     }
  * }
  * </pre>
  * </blockquote>
  * 
- * Next, we define our Printer service which depends on the PrinterConfiguration:
+ * You can also define your own component properties using a custom type-safe interface:
  * 
  * <blockquote>
  * <pre>
  * package sample;
- * import aQute.bnd.annotation.metatype.*;
+ * 
+ * interface PrinterConfig {
+ *     String getAddress();    	
+ *     int getPort();
+ * }
+ * </pre>
+ * </blockquote>
+ * 
+ * Next, we define our Printer service which depends on the PrinterConfig:
+ * 
+ * <blockquote>
+ * <pre>
+ * package sample;
  *
  * &#64;Component
  * public class Printer {
- *     &#64;ConfigurationDependency // Will use the fqdn of the  PrinterConfiguration interface as the pid.
- *     void updated(PrinterConfiguration cnf) {
- *         String ip = cnf.ipAddress();
- *         int port = cnf.portNumber();
- *         ...
+ *     &#64;ConfigurationDependency // Will use the fqdn of the  PrinterConfig interface as the pid.
+ *     void updated(PrinterConfig cnf) {
+ *         if (cnf != null) {
+ *             String ip = cnf.getAddress();
+ *             int port = cnf.getPort();
+ *         }
  *     }
  * }
  * </pre>
@@ -101,8 +117,18 @@ import java.util.Map;
  * "mangled" to the following form: <tt>[lower case letter] [any valid character]*</tt>. Method names starting with
  * <tt>get</tt> or <tt>is</tt> (JavaBean convention) are stripped from these prefixes. For example: given a dictionary
  * with the key <tt>"foo"</tt> can be accessed from a configuration-type using the following method names:
- * <tt>foo()</tt>, <tt>getFoo()</tt> and <tt>isFoo()</tt>.
- * </p>
+ * <tt>foo()</tt>, <tt>getFoo()</tt> and <tt>isFoo()</tt>.<p>
+ * If the property contains a dot (which is invalid in java method names), then dots (".") can be converted using the following conventions: 
+ * <ul>
+ * 
+ * <li> if the method name follows the javabean convention and/or kamel casing convention, then each capital letter is assumed to map to a "dot", 
+ * followed by the same letter in lower case. This means only lower case properties are 
+ * supported in this case. Example: getFooBar() or fooBar() will map to "foo.bar" property.
+ * 
+ * <li> else, if the method name follows the standard OSGi metatype specification, then dots  
+ * are encoded as "_"; and "_" is encoded as "__". (see OSGi r6 compendium, chapter 105.9.2).
+ * Example: "foo_BAR()" is mapped to "foo.BAR" property; "foo__BAR_zoo()" is mapped to "foo_BAR.zoo" property.
+ * </ul>
  * <p>
  * The return values supported are: primitive types (or their object wrappers), strings, enums, arrays of
  * primitives/strings, {@link Collection} types, {@link Map} types, {@link Class}es and interfaces. When an interface is
@@ -121,14 +147,14 @@ import java.util.Map;
  * 
  * <pre>{@code "map" => "{key1.value1, key2.value2}"}</pre> 
  * 
- * and a dictionary with <p>
+ * and a dictionary with
  * 
  * <pre>{@code "map.key1" => "value1", "map2.key2" => "value2"}</pre> 
  * 
  * result in the same map being returned.
  * Instead of a map, you could also define an interface with the methods <tt>getKey1()</tt> and <tt>getKey2</tt> and use
  * that interface as return type instead of a {@link Map}.
- * </p>
+ * 
  * <p>
  * In case a lookup does not yield a value from the underlying map or dictionary, the following rules are applied:
  * <ol>
@@ -137,8 +163,7 @@ import java.util.Map;
  * <li>for arrays, collections and maps, an empty array/collection/map is returned;
  * <li>for other interface types that are treated as configuration type a null-object is returned.
  * </ol>
- * </p>
- * 
+ *  
  * @author <a href="mailto:dev@felix.apache.org">Felix Project Team</a>
  */
 @Retention(RetentionPolicy.CLASS)
@@ -146,17 +171,15 @@ import java.util.Map;
 public @interface ConfigurationDependency
 {
     /**
-     * Returns the pid for a given service (by default, the pid is the service class name).
+     * Returns the pid for a given service (by default, the pid is the service class name, of the FQDN of 
+     * the configuration type found in the updated callback signature.
      * @return the pid for a given service (default = Service class name)
      */
     String pid() default "";
     
     /**
      * Returns the pid from a class name. The full class name will be used as the configuration PID.
-     * You can use this method when you use an interface annotated with standard bndtols metatype annotations.
-     * (see http://www.aqute.biz/Bnd/MetaType).
-     * @return the pid class
-     * @deprecated just define an updated callback which accepts as argument a configuration type.
+     * @return the pid class whose FQDN name is used as the configuration PID.
      */
     Class<?> pidClass() default Object.class;
     
@@ -166,8 +189,16 @@ public @interface ConfigurationDependency
      * @return true if configuration must be published along with the service, false if not.
      */
     boolean propagate() default false;
-    
+        
     /**
+     * Sets the required flag which determines if this configuration dependency is required or not.
+     * A configuration dependency is required by default.
+     * 
+     * @return this service dependency
+     */
+	boolean required() default true;    
+
+	/**
      * The name for this configuration dependency. When you give a name a dependency, it won't be evaluated
      * immediately, but after the component's init method has been called, and from the init method, you can then return 
      * a map in order to dynamically configure the configuration dependency (the map has to contain a "pid" and/or "propagate" 
@@ -219,34 +250,4 @@ public @interface ConfigurationDependency
      *  @return the dependency name used to configure the dependency dynamically from init callback
      */
     String name() default "";
-    
-    /**
-     * Sets the required flag which determines if this configuration dependency is required or not.
-     * A configuration dependency is required by default.
-     * 
-     * @param required the required flag
-     * @return this service dependency
-     */
-	boolean required() default true;
-    
-   /**
-     * The label used to display the tab name (or section) where the properties are displayed. Example: "Printer Service".
-     * @return The label used to display the tab name where the properties are displayed.
-     * @deprecated use standard bndtools metatype annotations instead (see http://www.aqute.biz/Bnd/MetaType)
-     */
-    String heading() default "";
-
-    /**
-     * A human readable description of the PID this annotation is associated with. Example: "Configuration for the PrinterService bundle".
-     * @return A human readable description of the PID this annotation is associated with.
-     * @deprecated use standard bndtools metatype annotations instead (see http://www.aqute.biz/Bnd/MetaType)
-     */
-    String description() default "";
-
-    /**
-     * The list of properties types used to expose properties in web console. 
-     * @return The list of properties types used to expose properties in web console.
-     * @deprecated use standard bndtools metatype annotations instead (see http://www.aqute.biz/Bnd/MetaType)
-     */
-    PropertyMetaData[] metadata() default {};
 }

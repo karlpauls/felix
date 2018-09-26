@@ -33,6 +33,7 @@ import aQute.bnd.osgi.Clazz;
 import aQute.bnd.osgi.EmbeddedResource;
 import aQute.bnd.osgi.Resource;
 import aQute.bnd.osgi.Clazz.QUERY;
+import aQute.bnd.osgi.Descriptors.TypeRef;
 
 /**
  * This helper parses all classes which contain DM annotations, and generates the corresponding component descriptors.
@@ -97,15 +98,31 @@ public class DescriptorGenerator
         Collection<Clazz> expanded = m_analyzer.getClasses("",
                                                            // Parse everything
                                                            QUERY.NAMED.toString(), "*");
-
-        // Create the object which will collect Config Admin MetaTypes.
-        MetaType metaType = new MetaType();
             
         for (Clazz c : expanded)
         {
-            // Let's parse all annotations from that class !
-            AnnotationCollector reader = new AnnotationCollector(m_logger, metaType);
+            AnnotationCollector reader = new AnnotationCollector(m_logger, m_analyzer);
+            reader.baseClass(true);
+            m_logger.debug("scanning class %s", c.getClassName());
             c.parseClassFileWithCollector(reader);
+
+            // parse inherited annotations.
+            while (reader.getSuperClass() != null) {
+            	Clazz superClazz = m_analyzer.findClass(reader.getSuperClass());
+            	if (superClazz == null) {
+            		m_logger.error("Can't find super class %s from %s", reader.getSuperClass(), c.getClassName());
+            		break;
+            	}
+            	if (isObject(reader.getSuperClass()) || isScalaObject(reader.getSuperClass())) {
+            		/* don't scan java.lang.Object or scala object ! */
+            		break;
+            	}
+
+            	m_logger.debug("scanning super class %s for class %s", reader.getSuperClass(), c.getClassName());
+            	reader.baseClass(false);
+            	superClazz.parseClassFileWithCollector(reader);				
+            }
+
             if (reader.finish())
             {
                 // And store the generated component descriptors in our resource list.
@@ -119,15 +136,10 @@ public class DescriptorGenerator
             }
         }
 
-        // If some Meta Types have been parsed, then creates the corresponding resource file.
-        if (metaType.getSize() > 0)
-        {
-            m_metaTypeResource = createMetaTypeResource(metaType);
-        }
         return annotationsFound;
     }
 
-    /**
+	/**
      * Returns the path of the descriptor.
      * @return the path of the generated descriptors.
      */
@@ -179,6 +191,20 @@ public class DescriptorGenerator
     {
         return m_exportService;
     }    
+    
+    /**
+     * Tests if a given type is java.lang.Object
+     */
+    private boolean isObject(TypeRef typeRef) {
+    	return (typeRef.isJava());
+	}
+    
+    /**
+     * Tests if a given type is scala object.
+     */
+    private boolean isScalaObject(TypeRef typeRef) {
+    	return (typeRef.getBinary().equals("scala/ScalaObject"));
+    }
 
     /**
      * Creates a bnd resource that contains the generated dm descriptor.
@@ -197,20 +223,4 @@ public class DescriptorGenerator
         return new EmbeddedResource(data, 0);
     }
     
-    /**
-     * Creates a bnd resource that contains the generated metatype descriptor.
-     * @param metaType the Object that has collected all meta type informations.
-     * @return the meta type resource
-     * @throws IOException on any errors
-     */
-    private Resource createMetaTypeResource(MetaType metaType) throws IOException
-    {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        PrintWriter pw = new PrintWriter(new OutputStreamWriter(out, "UTF-8"));
-        metaType.writeTo(pw);
-        pw.close();
-        byte[] data = out.toByteArray();
-        out.close();
-        return new EmbeddedResource(data, 0);    
-    }
 }

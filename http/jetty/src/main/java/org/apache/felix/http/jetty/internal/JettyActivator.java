@@ -16,6 +16,7 @@
  */
 package org.apache.felix.http.jetty.internal;
 
+import java.io.Closeable;
 import java.util.Dictionary;
 import java.util.Hashtable;
 
@@ -25,21 +26,22 @@ import org.osgi.framework.Bundle;
 import org.osgi.framework.Constants;
 import org.osgi.framework.ServiceFactory;
 import org.osgi.framework.ServiceRegistration;
-import org.osgi.service.cm.ManagedServiceFactory;
 
 public final class JettyActivator extends AbstractHttpActivator
 {
     private JettyService jetty;
 
-    private ServiceRegistration<?> metatypeReg;
-    private ServiceRegistration<LoadBalancerCustomizerFactory> loadBalancerCustomizerFactoryReg;
-    private JettyManagedServiceFactory jettyServiceFactory;
+    private volatile ServiceRegistration<?> metatypeReg;
+    private volatile ServiceRegistration<LoadBalancerCustomizerFactory> loadBalancerCustomizerFactoryReg;
+    private volatile ServiceRegistration<?> jettyServiceFactoryReg;
+
+    private volatile Closeable managedServiceFactory;
 
     @Override
     protected void doStart() throws Exception
     {
         super.doStart();
-        final Dictionary<String, Object> properties = new Hashtable<String, Object>();
+        final Dictionary<String, Object> properties = new Hashtable<>();
         properties.put(Constants.SERVICE_DESCRIPTION, "Metatype provider for Jetty Http Service");
         properties.put(Constants.SERVICE_VENDOR, "The Apache Software Foundation");
         properties.put("metatype.pid", JettyService.PID);
@@ -63,7 +65,7 @@ public final class JettyActivator extends AbstractHttpActivator
         this.jetty = new JettyService(getBundleContext(), getHttpServiceController());
         this.jetty.start();
 
-        final Dictionary<String, Object> propertiesCustomizer = new Hashtable<String, Object>();
+        final Dictionary<String, Object> propertiesCustomizer = new Hashtable<>();
         propertiesCustomizer.put(Constants.SERVICE_DESCRIPTION, "Load Balancer Customizer Factory for Jetty Http Service");
         propertiesCustomizer.put(Constants.SERVICE_VENDOR, "The Apache Software Foundation");
         loadBalancerCustomizerFactoryReg = this.getBundleContext().registerService(LoadBalancerCustomizerFactory.class,
@@ -86,12 +88,46 @@ public final class JettyActivator extends AbstractHttpActivator
                     }
                 }, propertiesCustomizer);
 
-        this.jettyServiceFactory = new JettyManagedServiceFactory(this.getBundleContext());
+        final Dictionary<String, Object> factoryProps = new Hashtable<>();
+        factoryProps.put(Constants.SERVICE_PID, JettyService.PID);
+        factoryProps.put(Constants.SERVICE_VENDOR, "The Apache Software Foundation");
+        factoryProps.put(Constants.SERVICE_DESCRIPTION, "Managed Service Factory for the Jetty Http Service");
+        this.jettyServiceFactoryReg = this.getBundleContext().registerService("org.osgi.service.cm.ManagedServiceFactory",
+                new ServiceFactory()
+                {
+
+                    @Override
+                    public Object getService(final Bundle bundle,
+                            final ServiceRegistration registration)
+                    {
+                        synchronized ( jetty )
+                        {
+                            if ( managedServiceFactory == null )
+                            {
+                                managedServiceFactory = new JettyManagedServiceFactory(getBundleContext());
+                            }
+                        }
+                        return managedServiceFactory;
+                    }
+
+                    @Override
+                    public void ungetService(final Bundle bundle,
+                            final ServiceRegistration registration,
+                            final Object service)
+                    {
+                        // do nothing
+                    }
+                }, factoryProps);
+
     }
 
     @Override
     protected void doStop() throws Exception
     {
+        if ( this.managedServiceFactory != null )
+        {
+            this.managedServiceFactory.close();
+        }
         this.jetty.stop();
         if ( metatypeReg != null )
         {
@@ -103,10 +139,10 @@ public final class JettyActivator extends AbstractHttpActivator
             loadBalancerCustomizerFactoryReg.unregister();
             loadBalancerCustomizerFactoryReg = null;
         }
-        if ( jettyServiceFactory != null )
+        if ( jettyServiceFactoryReg != null )
         {
-            jettyServiceFactory.stop();
-            jettyServiceFactory = null;
+            jettyServiceFactoryReg.unregister();
+            jettyServiceFactoryReg = null;
         }
 
         super.doStop();

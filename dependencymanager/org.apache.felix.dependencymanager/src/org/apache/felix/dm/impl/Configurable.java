@@ -18,21 +18,26 @@
  */
 package org.apache.felix.dm.impl;
 
+import java.lang.annotation.Annotation;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Proxy;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Dictionary;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -58,6 +63,15 @@ import java.util.TreeSet;
  * <tt>get</tt> or <tt>is</tt> (JavaBean convention) are stripped from these prefixes. For example: given a dictionary
  * with the key <tt>"foo"</tt> can be accessed from a configuration-type using the following method names:
  * <tt>foo()</tt>, <tt>getFoo()</tt> and <tt>isFoo()</tt>.
+ *  
+ * If the property name contains some dots, the the following conventions are used: 
+ * <ul> 
+ * <li>camel casing: if a property contains multiple words separated by dots, then you can indicate words boundaries using medial capitalization.
+ * For example, the property "foo.bar" could be accessed with a method name like "fooBar()" or "getFooBar()".  
+ * <li> use underscore to wrap dots: underscore ("_") found in method names are converted to ".", unless they are followed by another underscore.
+ * (in this case, the double "__" is then converted to single underscore ("_").
+ * For Example: foo_bar() will be mapped to "foo.bar" property, and foo__bar() will be mapped to "foo_bar" property.
+ * </ul>
  * </p>
  * <p>
  * The return values supported are: primitive types (or their object wrappers), strings, enums, arrays of
@@ -93,14 +107,35 @@ public final class Configurable {
 	static class ConfigHandler implements InvocationHandler {
         private final ClassLoader m_cl;
         private final Map<?, ?> m_config;
+        private Class<?> m_configType;
+        
+        /** Constant for the single element method */
+        private static final String VALUE_METHOD = "value";
 
-        public ConfigHandler(ClassLoader cl, Map<?, ?> config) {
+        /** Constant for the prefix constant. */
+        private static final String PREFIX_CONSTANT = "PREFIX_";
+
+        /** Capture all methods defined by the annotation interface */
+        private static final Set<Method> ANNOTATION_METHODS = new HashSet<Method>();
+        static
+        {
+            for(final Method m : Annotation.class.getMethods())
+            {
+                ANNOTATION_METHODS.add(m);
+            }
+        }
+
+        public ConfigHandler(Class<?> type, ClassLoader cl, Map<?, ?> config) {
+            m_configType = type;
             m_cl = cl;
             m_config = config;
         }
 
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            if (method.getName().equals("toString")) {
+                return m_config.toString();
+            }
             String name = getPropertyName(method.getName());
 
             Object result = convert(method.getGenericReturnType(), name, m_config.get(name), false /* useImplicitDefault */);
@@ -115,7 +150,7 @@ public final class Configurable {
         }
 
         @SuppressWarnings("unchecked")
-        private Object convert(ParameterizedType type, String key, Object value) throws Exception {
+        private Object convertParameterizedType(ParameterizedType type, String key, Object value, boolean useImplicitDefault) throws Exception {
             Class<?> resultType = (Class<?>) type.getRawType();
             if (Class.class.isAssignableFrom(resultType)) {
                 if (value == null) {
@@ -125,6 +160,9 @@ public final class Configurable {
             }
             else if (Collection.class.isAssignableFrom(resultType)) {
                 Collection<?> input = toCollection(key, value);
+                if (input == null && ! useImplicitDefault) {
+                	return null;
+                }
 
                 if (resultType == Collection.class || resultType == List.class) {
                     resultType = ArrayList.class;
@@ -150,6 +188,9 @@ public final class Configurable {
             }
             else if (Map.class.isAssignableFrom(resultType)) {
                 Map<?, ?> input = toMap(key, value);
+                if (input == null && ! useImplicitDefault) {
+                	return null;
+                }
 
                 if (resultType == SortedMap.class) {
                     resultType = TreeMap.class;
@@ -165,8 +206,10 @@ public final class Configurable {
                 Type keyType = type.getActualTypeArguments()[0];
                 Type valueType = type.getActualTypeArguments()[1];
 
-                for (Map.Entry<?, ?> entry : input.entrySet()) {
-                    result.put(convert(keyType, key, entry.getKey(), false /* useImplicitDefault */), convert(valueType, key, entry.getValue(), false /* useImplicitDefault */));
+                if (input != null) {
+                	for (Map.Entry<?, ?> entry : input.entrySet()) {
+                		result.put(convert(keyType, key, entry.getKey(), false /* useImplicitDefault */), convert(valueType, key, entry.getValue(), false /* useImplicitDefault */));
+                	}
                 }
                 return result;
             }
@@ -177,14 +220,14 @@ public final class Configurable {
         @SuppressWarnings({ "unchecked", "rawtypes" })
         private Object convert(Type type, String key, Object value, boolean useImplicitDefault) throws Exception {
             if (type instanceof ParameterizedType) {
-                return convert((ParameterizedType) type, key, value);
+                return convertParameterizedType((ParameterizedType) type, key, value, useImplicitDefault);
             }
             if (type instanceof GenericArrayType) {
-                return convertArray(((GenericArrayType) type).getGenericComponentType(), key, value);
+                return convertArray(((GenericArrayType) type).getGenericComponentType(), key, value, useImplicitDefault);
             }
             Class<?> resultType = (Class<?>) type;
             if (resultType.isArray()) {
-                return convertArray(resultType.getComponentType(), key, value);
+                return convertArray(resultType.getComponentType(), key, value, useImplicitDefault);
             }
             if (resultType.isInstance(value)) {
                 return value;
@@ -272,13 +315,16 @@ public final class Configurable {
             }
             else if (resultType.isInterface()) {
                 Map<?, ?> map = toMap(key, value);
+                if (map == null) {
+                	return useImplicitDefault ? create(resultType, Collections.emptyMap()) : null;
+                }
                 return create(resultType, map);
             }
 
             throw new RuntimeException("Unhandled type: " + type);
         }
 
-        private Object convertArray(Type type, String key, Object value) throws Exception {
+        private Object convertArray(Type type, String key, Object value, boolean useImplicitDefault) throws Exception {
             if (value instanceof String) {
                 String str = (String) value;
                 if (type == Byte.class || type == byte.class) {
@@ -290,6 +336,9 @@ public final class Configurable {
             }
 
             Collection<?> input = toCollection(key, value);
+            if (input == null && useImplicitDefault) {
+            	input = Collections.emptyList();
+            }
             if (input == null) {
                 return null;
             }
@@ -362,7 +411,7 @@ public final class Configurable {
                     result.add(Math.min(result.size(), idx), entry.getValue());
                 }
 
-                return result;
+                return result.size() == 0 ? null : result;
             }
 
             if (value.getClass().isArray()) {
@@ -382,7 +431,8 @@ public final class Configurable {
                 if (str.startsWith("[") && str.endsWith("]")) {
                     str = str.substring(1, str.length() - 1);
                 }
-                return Arrays.asList(str.split("\\s*,\\s*"));
+                // don't split in case we are parsing an empty [] list, in which case we need to return an empty list.
+                return str.length() == 0 ? Collections.emptyList() : Arrays.asList(str.split("\\s*,\\s*"));
             }
 
             return Arrays.asList(value);
@@ -402,6 +452,9 @@ public final class Configurable {
                         result.put(key.substring(needle.length()), entry.getValue());
                     }
                 }
+                if (result.size() == 0) {
+                	return null;
+                }
             }
             else if (value instanceof String) {
                 String str = (String) value;
@@ -410,27 +463,236 @@ public final class Configurable {
                 }
                 for (String entry : str.split("\\s*,\\s*")) {
                     String[] pair = entry.split("\\s*\\.\\s*", 2);
-                    result.put(pair[0], pair[1]);
+                    if (pair.length == 2) {
+                    	result.put(pair[0], pair[1]);
+                    }
                 }
             }
 
             return result;
         }
-
-        private String getPropertyName(String id) {
-            StringBuilder sb = new StringBuilder(id);
-            if (id.startsWith("get")) {
-                sb.delete(0, 3);
+        
+        private String getPropertyName(String methodName) {            
+            // First, check if the config type defines a standard PREFIX_ string.
+            String prefix = getPrefix(m_configType);
+            
+            // If the configuration type is a single valued annotation, derive the property name
+            // from the interface name, using OSGi R7 Scr convention 
+            
+            if (isSingleElementAnnotation(m_configType) && methodName.equals(VALUE_METHOD)) {
+                String propertyName = mapTypeNameToKey(m_configType.getSimpleName());
+                return prefix == null ? propertyName : prefix.concat(propertyName);
             }
-            else if (id.startsWith("is")) {
+            
+            // Now, derive the property name from the method name, using simple javabean convention.
+            // i.e: fooBar() or getFooBar() will map to "fooBar" property.
+            
+            String javaBeanMethodName = derivePropertyNameUsingJavaBeanConvention(methodName);
+            if (hasValueFor(javaBeanMethodName)) {
+                // there is a value in the actual configuration for the derived property name.
+                return javaBeanMethodName;
+            }
+            
+            // Derive the property name from the method name, using javabeans and/or camel casing convention,
+            // where each capital letter is assumed to map a "dot".
+            // i.e: fooBar() or getFooBar() will map to "foo.bar" property.
+
+            String camelCasePropertyName = derivePropertyNameUsingCamelCaseConvention(javaBeanMethodName);
+            if (hasValueFor(camelCasePropertyName)) {
+                // there is a value in the actual configuration for the derived property name.
+                return camelCasePropertyName;
+            }
+            
+            // Derive the property name from the method name, using OSGi metatype convention,
+            // where a "_" is mapped to a dot, except if the understcore is followed by another undescore
+            // (in this case, the double "__" is replaced by "_").
+            // i.e: foo_bar() will map to "foo.bar" property and foo__bar() will map to "foo_bar" property.
+            
+            String metaTypePropertyName = derivePropertyNameUsingMetaTypeConvention(methodName);
+            if (hasValueFor(metaTypePropertyName)) {
+                // there is a value in the actual configuration for the derived property name.
+                return metaTypePropertyName;
+            }
+            
+            // No value could be found, return by default a property name derived from javabean convention.
+            return javaBeanMethodName;
+        }
+        
+        private String derivePropertyNameUsingJavaBeanConvention(String methodName) {
+            StringBuilder sb = new StringBuilder(methodName);
+            
+            if (methodName.startsWith("get")) {
+                sb.delete(0, 3);
+            } else if (methodName.startsWith("is")) {
                 sb.delete(0, 2);
             }
+            
             char c = sb.charAt(0);
             if (Character.isUpperCase(c)) {
                 sb.setCharAt(0, Character.toLowerCase(c));
             }
+            
+            return (sb.toString());
+        }
+
+        private String derivePropertyNameUsingCamelCaseConvention(String methodName) {
+            StringBuilder sb = new StringBuilder(methodName);
+            for (int i = 0; i < sb.length(); i++) {
+                char c = sb.charAt(i);
+                if (Character.isUpperCase(c)) {
+                    // camel casing: replace fooBar -> foo.bar
+                    sb.setCharAt(i, Character.toLowerCase(c));
+                    sb.insert(i, ".");
+                }
+            }
+            return sb.toString();            
+        }
+        
+        // see metatype spec, chapter 105.9.2 in osgi r6 cmpn.
+        private String derivePropertyNameUsingMetaTypeConvention(String methodName) {
+            StringBuilder sb = new StringBuilder(methodName);
+            // replace "__" by "_" or "_" by ".": foo_bar -> foo.bar; foo__BAR_zoo -> foo_BAR.zoo
+            for (int i = 0; i < sb.length(); i ++) {
+                if (sb.charAt(i) == '_') {
+                    if (i < (sb.length() - 1) && sb.charAt(i+1) == '_') {
+                        // replace foo__bar -> foo_bar
+                        sb.replace(i, i+2, "_");
+                    } else {
+                        // replace foo_bar -> foo.bar
+                        sb.replace(i, i+1, ".");
+                    }
+                } else if (sb.charAt(i) == '$') {
+                    if (i < (sb.length() - 1) && sb.charAt(i+1) == '$') {
+                        // replace foo__bar -> foo_bar
+                        sb.replace(i, i+2, "$");
+                    } else {
+                        // remove single dollar character.
+                        sb.delete(i, i+1);
+                    }
+                }
+            }
             return sb.toString();
         }
+        
+        /**
+         * Checks if a property name has a given value. This method takes care about special array values (arr.0, arr.1,...) 
+         * and about map values (map.key1, map.key2, ...).
+         * 
+         * @param property name
+         * @return true if the given property has a value in the actual configuration, false if not.
+         */
+        private boolean hasValueFor(String property)
+        {
+            if (m_config.containsKey(property)) {
+                return true;
+            }
+            String needle = property.concat(".");       
+            for (Map.Entry<?, ?> entry : m_config.entrySet()) {
+                String key = entry.getKey().toString();
+                if (key.startsWith(needle)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        // Code derived from Apache Felix SCR (See org.apache.felix.scr.impl.inject.Annotations.java)
+        private String getPrefix(Class<?> clazz)
+        {
+            try
+            {
+                final Field f = clazz.getField(PREFIX_CONSTANT);
+                if ( Modifier.isStatic(f.getModifiers())
+                     && Modifier.isPublic(f.getModifiers())
+                     && Modifier.isFinal(f.getModifiers())
+                     && String.class.isAssignableFrom(f.getType()))
+                {
+                    final Object value = f.get(null);
+                    if ( value != null )
+                    {
+                        return value.toString();
+                    }
+                }
+            }
+            catch ( final Exception ignore)
+            {
+                // ignore
+            }
+            return null;
+        }
+        
+        /**
+         * Check whether the provided type is a single element annotation.
+         * A single element annotation has a method named "value" and all
+         * other annotation methods must have a default value.
+         * @param clazz The provided type
+         * @return {@code true} if the type is a single element annotation.
+         */
+        static public boolean isSingleElementAnnotation(final Class<?> clazz)
+        {
+            boolean result = false;
+            if ( clazz.isAnnotation() )
+            {
+                result = true;
+                boolean hasValue = false;
+                for ( final Method method: clazz.getMethods() )
+                {
+                    // filter out methods from Annotation
+                    boolean isFromAnnotation = false;
+                    for(final Method objMethod : ANNOTATION_METHODS)
+                    {
+                        if ( objMethod.getName().equals(method.getName())
+                          && Arrays.equals(objMethod.getParameterTypes(), method.getParameterTypes()) )
+                        {
+                            isFromAnnotation = true;
+                            break;
+                        }
+                    }
+                    if ( isFromAnnotation )
+                    {
+                        continue;
+                    }
+                    if ( VALUE_METHOD.equals(method.getName()) )
+                    {
+                        hasValue = true;
+                        continue;
+                    }
+                    if ( method.getDefaultValue() == null )
+                    {
+                        result = false;
+                        break;
+                    }
+
+                }
+                if ( result )
+                {
+                    result = hasValue;
+                }
+
+            }
+            return result;
+        }
+
+        static String mapTypeNameToKey(String name)
+        {
+            final StringBuilder sb = new StringBuilder();
+            boolean lastLow = false;
+            for(final char c : name.toCharArray())
+            {
+                if ( lastLow && (Character.isLetter(c) || Character.isDigit(c)) && Character.isUpperCase(c) )
+                {
+                    sb.append('.');
+                }
+                lastLow = false;
+                if ( (Character.isLetter(c) || Character.isDigit(c)) && Character.isLowerCase(c))
+                {
+                    lastLow = true;
+                }
+                sb.append(Character.toLowerCase(c));
+            }
+            return sb.toString();
+        }
+
     }
 
     private static final Boolean DEFAULT_BOOLEAN = Boolean.FALSE;
@@ -446,10 +708,15 @@ public final class Configurable {
      * 
      * @param type the configuration class, cannot be <code>null</code>;
      * @param config the configuration to wrap, cannot be <code>null</code>.
+     * @param serviceProperties the component service properties, cannot be <code>null</code>.
      * @return an instance of the given type that wraps the given configuration.
      */
-    public static <T> T create(Class<T> type, Dictionary<?, ?> config) {
+    public static <T> T create(Class<T> type, Dictionary<?, ?> config, Dictionary<?,?> serviceProperties) {
         Map<Object, Object> map = new HashMap<Object, Object>();
+        for (Enumeration<?> e = serviceProperties.keys(); e.hasMoreElements();) {
+            Object key = e.nextElement();
+            map.put(key, serviceProperties.get(key));
+        }        
         for (Enumeration<?> e = config.keys(); e.hasMoreElements();) {
             Object key = e.nextElement();
             map.put(key, config.get(key));
@@ -466,7 +733,7 @@ public final class Configurable {
      */
     public static <T> T create(Class<T> type, Map<?, ?> config) {
         ClassLoader cl = type.getClassLoader();
-        Object result = Proxy.newProxyInstance(cl, new Class<?>[] { type }, new ConfigHandler(cl, config));
+        Object result = Proxy.newProxyInstance(cl, new Class<?>[] { type }, new ConfigHandler(type, cl, config));
         return type.cast(result);
     }
 }

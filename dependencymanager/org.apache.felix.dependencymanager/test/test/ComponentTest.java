@@ -21,8 +21,6 @@ package test;
 import org.apache.felix.dm.Component;
 import org.apache.felix.dm.ComponentState;
 import org.apache.felix.dm.ComponentStateListener;
-import org.apache.felix.dm.Dependency;
-import org.apache.felix.dm.context.AbstractDependency;
 import org.apache.felix.dm.impl.ComponentImpl;
 import org.junit.Assert;
 import org.junit.Test;
@@ -130,17 +128,17 @@ public class ComponentTest {
             }
             void destroy() {
                 System.out.println("destroy");
-                e.step(9);
+                e.step(7);
             }
         });
         e.step(1);
         c.start();
-        e.step(5);
+        e.step(3);
         d2.add(new EventImpl());
-        e.step(7);
+        e.step(5);
         d.remove(new EventImpl());
         c.stop();
-        e.step(10);
+        e.step(8);
     }
     
 	@Test

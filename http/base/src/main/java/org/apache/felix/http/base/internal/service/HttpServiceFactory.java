@@ -18,18 +18,10 @@ package org.apache.felix.http.base.internal.service;
 
 import java.util.Hashtable;
 
-import javax.annotation.Nonnull;
+import org.jetbrains.annotations.NotNull;
 import javax.servlet.ServletContext;
-import javax.servlet.http.HttpSessionAttributeListener;
-import javax.servlet.http.HttpSessionListener;
 
-import org.apache.felix.http.api.ExtHttpService;
 import org.apache.felix.http.base.internal.registry.HandlerRegistry;
-import org.apache.felix.http.base.internal.service.listener.HttpSessionAttributeListenerManager;
-import org.apache.felix.http.base.internal.service.listener.HttpSessionListenerManager;
-import org.apache.felix.http.base.internal.service.listener.ServletContextAttributeListenerManager;
-import org.apache.felix.http.base.internal.service.listener.ServletRequestAttributeListenerManager;
-import org.apache.felix.http.base.internal.service.listener.ServletRequestListenerManager;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.Constants;
@@ -73,18 +65,13 @@ public final class HttpServiceFactory
     private final BundleContext bundleContext;
     private final boolean sharedContextAttributes;
 
-    private final ServletContextAttributeListenerManager contextAttributeListenerManager;
-    private final ServletRequestListenerManager requestListenerManager;
-    private final ServletRequestAttributeListenerManager requestAttributeListenerManager;
-    private final HttpSessionListenerManager sessionListenerManager;
-    private final HttpSessionAttributeListenerManager sessionAttributeListenerManager;
-
-    private final Hashtable<String, Object> httpServiceProps = new Hashtable<String, Object>();
+    private final Hashtable<String, Object> httpServiceProps = new Hashtable<>();
     private volatile ServletContext context;
-    private volatile ServiceRegistration<?> httpServiceReg;
+    private volatile ServiceRegistration<HttpService> httpServiceReg;
 
     private final HandlerRegistry handlerRegistry;
     private volatile SharedHttpServiceImpl sharedHttpService;
+
 
     public HttpServiceFactory(final BundleContext bundleContext,
             final HandlerRegistry handlerRegistry)
@@ -93,15 +80,10 @@ public final class HttpServiceFactory
         this.handlerRegistry = handlerRegistry;
         this.sharedContextAttributes = getBoolean(FELIX_HTTP_SHARED_SERVLET_CONTEXT_ATTRIBUTES);
 
-        this.contextAttributeListenerManager = new ServletContextAttributeListenerManager(bundleContext);
-        this.requestListenerManager = new ServletRequestListenerManager(bundleContext);
-        this.requestAttributeListenerManager = new ServletRequestAttributeListenerManager(bundleContext);
-        this.sessionListenerManager = new HttpSessionListenerManager(bundleContext);
-        this.sessionAttributeListenerManager = new HttpSessionAttributeListenerManager(bundleContext);
     }
 
     public void start(final ServletContext context,
-            @Nonnull final Hashtable<String, Object> props)
+            @NotNull final Hashtable<String, Object> props)
     {
         this.httpServiceProps.clear();
         this.httpServiceProps.putAll(props);
@@ -113,17 +95,11 @@ public final class HttpServiceFactory
         }
 
         this.context = context;
-        this.contextAttributeListenerManager.open();
-        this.requestListenerManager.open();
-        this.requestAttributeListenerManager.open();
-        this.sessionListenerManager.open();
-        this.sessionAttributeListenerManager.open();
 
         this.sharedHttpService = new SharedHttpServiceImpl(handlerRegistry);
 
-        final String[] ifaces = new String[] { HttpService.class.getName(), ExtHttpService.class.getName() };
         this.active = true;
-        this.httpServiceReg = bundleContext.registerService(ifaces, this, this.httpServiceProps);
+        this.httpServiceReg = bundleContext.registerService(HttpService.class, this, this.httpServiceProps);
     }
 
     public void stop()
@@ -139,12 +115,6 @@ public final class HttpServiceFactory
         this.context = null;
         this.sharedHttpService = null;
 
-        this.contextAttributeListenerManager.close();
-        this.requestListenerManager.close();
-        this.requestAttributeListenerManager.close();
-        this.sessionListenerManager.close();
-        this.sessionAttributeListenerManager.close();
-
         this.httpServiceProps.clear();
     }
 
@@ -155,22 +125,17 @@ public final class HttpServiceFactory
         if (active) {
             // Store everything that we want to pass to the PerBundleHttpServiceImpl in local vars to avoid
             // a race condition where the service might be stopped while this method is executing.
-            SharedHttpServiceImpl sharedHttpSvc = this.sharedHttpService;
-            ServletContext servletCtx = this.context;
-            ServletContextAttributeListenerManager servletCtxAttrListenerMgr = this.contextAttributeListenerManager;
-            boolean sharedCtxAttrs = this.sharedContextAttributes;
-            ServletRequestListenerManager reqListenerMgr = this.requestListenerManager;
-            ServletRequestAttributeListenerManager reqAttrListenerMgr = this.requestAttributeListenerManager;
+            final SharedHttpServiceImpl sharedHttpSvc = this.sharedHttpService;
+            final ServletContext servletCtx = this.context;
+
+            final boolean sharedCtxAttrs = this.sharedContextAttributes;
 
             if ( active ) {
                 // Only return the service if we're still active
                 return new PerBundleHttpServiceImpl(bundle,
                         sharedHttpSvc,
                         servletCtx,
-                        servletCtxAttrListenerMgr,
-                        sharedCtxAttrs,
-                        reqListenerMgr,
-                        reqAttrListenerMgr);
+                        sharedCtxAttrs);
             }
         }
         return null;
@@ -184,21 +149,6 @@ public final class HttpServiceFactory
         {
             ((PerBundleHttpServiceImpl)service).unregisterAll();
         }
-    }
-
-    public ServletContextAttributeListenerManager getContextAttributeListener()
-    {
-        return contextAttributeListenerManager;
-    }
-
-    public HttpSessionListener getSessionListener()
-    {
-        return sessionListenerManager;
-    }
-
-    public HttpSessionAttributeListener getSessionAttributeListener()
-    {
-        return sessionAttributeListenerManager;
     }
 
     public long getHttpServiceServiceId()

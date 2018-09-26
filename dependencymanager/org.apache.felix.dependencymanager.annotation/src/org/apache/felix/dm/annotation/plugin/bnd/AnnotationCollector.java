@@ -18,13 +18,27 @@
  */
 package org.apache.felix.dm.annotation.plugin.bnd;
 
+import static aQute.bnd.osgi.Clazz.QUERY.ANNOTATED;
+
 import java.io.PrintWriter;
+import java.lang.reflect.Array;
+import java.util.AbstractMap;
+import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Dictionary;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.felix.dm.annotation.api.AdapterService;
 import org.apache.felix.dm.annotation.api.AspectService;
@@ -34,29 +48,31 @@ import org.apache.felix.dm.annotation.api.Component;
 import org.apache.felix.dm.annotation.api.Composition;
 import org.apache.felix.dm.annotation.api.ConfigurationDependency;
 import org.apache.felix.dm.annotation.api.Destroy;
-import org.apache.felix.dm.annotation.api.FactoryConfigurationAdapterService;
 import org.apache.felix.dm.annotation.api.Init;
 import org.apache.felix.dm.annotation.api.Inject;
 import org.apache.felix.dm.annotation.api.LifecycleController;
 import org.apache.felix.dm.annotation.api.Property;
+import org.apache.felix.dm.annotation.api.PropertyType;
 import org.apache.felix.dm.annotation.api.Registered;
 import org.apache.felix.dm.annotation.api.RepeatableProperty;
-import org.apache.felix.dm.annotation.api.ResourceAdapterService;
-import org.apache.felix.dm.annotation.api.ResourceDependency;
 import org.apache.felix.dm.annotation.api.ServiceDependency;
+import org.apache.felix.dm.annotation.api.ServiceScope;
 import org.apache.felix.dm.annotation.api.Start;
 import org.apache.felix.dm.annotation.api.Stop;
 import org.apache.felix.dm.annotation.api.Unregistered;
-import org.json.JSONArray;
-import org.json.JSONException;
-import org.json.JSONObject;
 import org.osgi.framework.Bundle;
 
+import aQute.bnd.osgi.Analyzer;
 import aQute.bnd.osgi.Annotation;
 import aQute.bnd.osgi.ClassDataCollector;
 import aQute.bnd.osgi.Clazz;
+import aQute.bnd.osgi.Clazz.FieldDef;
+import aQute.bnd.osgi.Clazz.MethodDef;
+import aQute.bnd.osgi.Descriptors;
 import aQute.bnd.osgi.Descriptors.TypeRef;
+import aQute.bnd.osgi.Instruction;
 import aQute.bnd.osgi.Verifier;
+import aQute.lib.collections.MultiMap;
 
 /**
  * This is the scanner which does all the annotation parsing on a given class.
@@ -80,26 +96,23 @@ public class AnnotationCollector extends ClassDataCollector
     private final static String A_SERVICE_DEP = ServiceDependency.class.getName();
     private final static String A_CONFIGURATION_DEPENDENCY = ConfigurationDependency.class.getName();
     private final static String A_BUNDLE_DEPENDENCY = BundleDependency.class.getName();
-    private final static String A_RESOURCE_DEPENDENCY = ResourceDependency.class.getName();
     private final static String A_ASPECT_SERVICE = AspectService.class.getName();
     private final static String A_ADAPTER_SERVICE = AdapterService.class.getName();
     private final static String A_BUNDLE_ADAPTER_SERVICE = BundleAdapterService.class.getName();
-    private final static String A_RESOURCE_ADAPTER_SERVICE = ResourceAdapterService.class.getName();
-    private final static String A_FACTORYCONFIG_ADAPTER_SERVICE = FactoryConfigurationAdapterService.class.getName();
     private final static String A_INJECT = Inject.class.getName();
     private final static String A_REGISTERED = Registered.class.getName();
     private final static String A_UNREGISTERED = Unregistered.class.getName();
 
     private Logger m_logger;
-    private String m_className;
     private String[] m_interfaces;
     private boolean m_isField;
     private String m_field;
+	private FieldDef m_fieldDef;    
     private String m_method;
+	private MethodDef m_methodDef;
     private String m_descriptor;
-    private Set<String> m_dependencyNames = new HashSet<String>();
-    private List<EntryWriter> m_writers = new ArrayList<EntryWriter>();
-    private MetaType m_metaType;
+    private final Set<String> m_dependencyNames = new HashSet<String>();
+    private final List<EntryWriter> m_writers = new ArrayList<EntryWriter>();
     private String m_startMethod;
     private String m_stopMethod;
     private String m_initMethod;
@@ -107,14 +120,37 @@ public class AnnotationCollector extends ClassDataCollector
     private String m_compositionMethod;
     private String m_starter;
     private String m_stopper;
-    private Set<String> m_importService = new HashSet<String>();
-    private Set<String> m_exportService = new HashSet<String>();
+    private final Set<String> m_importService = new HashSet<String>();
+    private final Set<String> m_exportService = new HashSet<String>();
     private String m_bundleContextField;
     private String m_dependencyManagerField;
+    private String m_registrationField;
+    private String m_bundleField;
     private String m_componentField;
     private String m_registeredMethod;
     private String m_unregisteredMethod;
+	private TypeRef	m_superClass;
+	private boolean m_baseClass = true;
+	private final static String[] EMPTY_STRING_ARRAY = new String[0];
+	
+	/**
+	 * Name of the class annotated with @Component (or other kind of components, like aspect, adapters).
+	 */
+    private String m_componentClassName;
     
+    /*
+     * Name of class currently being parsed (the component class name at first, then the inherited classes).
+     * See DescriptorGenerator class, which first calls parseClassFileWithCollector method with the component class, then it calls 
+     * again the parseClassFileWithCollector method with all inherited component super classes. 
+     */
+    private String m_currentClassName;
+	
+    /**
+	 * Contains all bind methods annotated with a dependency.
+	 * Each entry has the format: "methodName/method signature".
+	 */
+	private final Set<String> m_bindMethods = new HashSet<>(); 
+
     /**
      * When more than one @Property annotation are declared on a component type (outside of the @Component annotation), then a @Repeatable 
      * annotation is used as the container for the @Property annotations. When such annotation is found, it is stored in this attribute, which 
@@ -133,15 +169,77 @@ public class AnnotationCollector extends ClassDataCollector
      */
     private final List<EntryType> m_componentTypes = Arrays.asList(EntryType.Component, EntryType.AspectService, EntryType.AdapterService,
         EntryType.BundleAdapterService, EntryType.ResourceAdapterService, EntryType.FactoryConfigurationAdapterService);
+    
+    
+    /**
+     * Class Analyzer used to scan component property type annotation. 
+     */
+	private final Analyzer m_analyzer;
+	
+	/**
+	 * List of component property type annotation applied on component class.
+	 */
+	private final List<Annotation> m_componentPropertyTypes = new ArrayList<>();
+	
+    /**
+     * List of all parsed methods. Key = method name, value is list of signatures.
+     * Example: if a component has two methods update(Dictionary) and updated(MyConfig), then the map will contain the following:
+     * "updated" -> ["(Ljava/util/Dictionary;)V", "(Lfoo.bar.MyConfig;)V"]
+     */
+    final Map<String, List<Descriptors.Descriptor>> m_methods = new HashMap<>();
+    	
+	/**
+	 * Object used to see if an annotation is matching a declarative service ComponentPropertyType annotation.
+	 */
+	private static final Instruction DS_PROPERTY_TYPE = new Instruction("org.osgi.service.component.annotations.ComponentPropertyType");
+	
+	/**
+	 * Object used to see if an annotation is matching a DM PropertyType annotation.
+	 */
+	private static final Instruction DM_PROPERTY_TYPE = new Instruction(PropertyType.class.getName());
 
+	/**
+	 * Mapping between type strings -> type class
+	 */	
+	private final static Map<String,Class<?>>m_types = Collections.unmodifiableMap(Stream.of(
+            new SimpleEntry<>("boolean", Boolean.class),
+            new SimpleEntry<>("byte", Byte.class),
+            new SimpleEntry<>("short", Short.class),
+            new SimpleEntry<>("char", Character.class),
+            new SimpleEntry<>("int", Integer.class),
+            new SimpleEntry<>("long", Long.class),
+            new SimpleEntry<>("float", Float.class),
+            new SimpleEntry<>("double", Double.class))
+			.collect(Collectors.toMap(SimpleEntry::getKey, SimpleEntry::getValue)));
+
+	/**
+	 * Marker used when parsing component property types annotations.
+	 * (To make sure the output is an array, we must make sure there is more than one entry)
+	 */
+	private final static String	MARKER = new String("|marker");
+	
+	/**
+	 * Pattern used when parsing component property type annotations.
+	 */
+	private static final Pattern IDENTIFIERTOPROPERTY = Pattern.compile("(__)|(_)|(\\$_\\$)|(\\$\\$)|(\\$)");
+	
     /**
      * Makes a new Collector for parsing a given class.
      * @param reporter the object used to report logs.
+     * @param m_analyzer 
      */
-    public AnnotationCollector(Logger reporter, MetaType metaType)
+    public AnnotationCollector(Logger reporter, Analyzer analyzer)
     {
         m_logger = reporter;
-        m_metaType = metaType;
+        m_analyzer = analyzer;
+    }
+    
+    /**
+     * Indicates that we are parsing a superclass of a given component class.
+     */
+    public void baseClass(boolean baseClass) {
+        m_logger.debug("baseClass:%b", baseClass);
+    	m_baseClass = baseClass;
     }
 
     /**
@@ -152,8 +250,12 @@ public class AnnotationCollector extends ClassDataCollector
     @Override
     public void classBegin(int access, TypeRef name)
     {
-        m_className = name.getFQN();
-        m_logger.debug("class name: %s", m_className);
+    	if (m_baseClass) 
+    	{
+    		m_componentClassName = name.getFQN();
+            m_logger.debug("Parsing class: %s", m_componentClassName);
+    	}
+        m_currentClassName = name.getFQN();
     }
 
     /**
@@ -162,17 +264,20 @@ public class AnnotationCollector extends ClassDataCollector
     @Override
     public void implementsInterfaces(TypeRef[] interfaces)
     {
-        List<String> result = new ArrayList<String>();
-        for (int i = 0; i < interfaces.length; i++)
-        {
-            if (!interfaces[i].getBinary().equals("scala/ScalaObject"))
-            {
-                result.add(interfaces[i].getFQN());
-            }
-        }
+    	if (m_baseClass)
+    	{
+    		List<String> result = new ArrayList<String>();
+    		for (int i = 0; i < interfaces.length; i++)
+    		{
+    			if (!interfaces[i].getBinary().equals("scala/ScalaObject"))
+    			{
+    				result.add(interfaces[i].getFQN());
+    			}
+    		}
          
-        m_interfaces = result.toArray(new String[result.size()]);
-        m_logger.debug("implements: %s", Arrays.toString(m_interfaces));
+    		m_interfaces = result.toArray(new String[result.size()]);
+    		m_logger.debug("implements: %s", Arrays.toString(m_interfaces));
+    	}
     }
 
     /**
@@ -181,10 +286,12 @@ public class AnnotationCollector extends ClassDataCollector
     @Override
     public void method(Clazz.MethodDef method)
     {
-        m_logger.debug("Parsed method %s, descriptor=%s", method.getName(), method.getDescriptor());
+        m_logger.debug("Parsed method %s descriptor=%s signature=%s", method.getName(), method.getDescriptor(), method.getSignature());
         m_isField = false;
         m_method = method.getName();
+        m_methodDef = method;
         m_descriptor = method.getDescriptor().toString();
+        m_methods.computeIfAbsent(method.getName(), k -> new ArrayList<Descriptors.Descriptor>()).add(method.getDescriptor());
     }
 
     /**
@@ -193,11 +300,21 @@ public class AnnotationCollector extends ClassDataCollector
     @Override
     public void field(Clazz.FieldDef field)
     {
-        m_logger.debug("Parsed field %s, descriptor=%s", field.getName(), field.getDescriptor());
+        m_logger.debug("Parsed field %s descriptor=%s", field.getName(), field.getDescriptor());
         m_isField = true;
         m_field = field.getName();
+        m_fieldDef = field;
         m_descriptor = field.getDescriptor().toString();
     }
+
+	@Override
+	public void extendsClass(TypeRef name) {
+		m_superClass = name;
+	}
+	
+	public TypeRef getSuperClass() {
+		return m_superClass; 
+	}
 
     /** 
      * An annotation has been parsed. Always invoked AFTER the "method"/"field"/"classBegin" callbacks. 
@@ -206,84 +323,91 @@ public class AnnotationCollector extends ClassDataCollector
     public void annotation(Annotation annotation)
     {
         m_logger.debug("Parsing annotation: %s", annotation.getName());
-
-        if (annotation.getName().getFQN().equals(A_COMPONENT))
+        
+        // if we are parsing a superclass of a given component, then ignore any component annotations.        
+        String name = annotation.getName().getFQN();
+        if (! m_baseClass) { 
+            String simpleName = name.indexOf(".") != -1 ? name.substring(name.lastIndexOf(".")+1) : name;
+            Optional<EntryType> type = m_componentTypes.stream().filter(writer -> writer.name().equals(simpleName)).findFirst();
+            if (type.isPresent()) {
+                m_logger.debug("Ignoring annotation %s from super class %s of component class %s", name, m_currentClassName, m_componentClassName);
+                return;
+            }
+        }
+        
+        if (name.equals(A_COMPONENT))
         {
             parseComponentAnnotation(annotation);
         }
-        else if (annotation.getName().getFQN().equals(A_ASPECT_SERVICE))
+        else if (name.equals(A_ASPECT_SERVICE))
         {
             parseAspectService(annotation);
         }
-        else if (annotation.getName().getFQN().equals(A_ADAPTER_SERVICE))
+        else if (name.equals(A_ADAPTER_SERVICE))
         {
             parseAdapterService(annotation);
         }
-        else if (annotation.getName().getFQN().equals(A_BUNDLE_ADAPTER_SERVICE))
+        else if (name.equals(A_BUNDLE_ADAPTER_SERVICE))
         {
             parseBundleAdapterService(annotation);
         }
-        else if (annotation.getName().getFQN().equals(A_RESOURCE_ADAPTER_SERVICE))
+        else if (name.equals(A_INIT))
         {
-            parseResourceAdapterService(annotation);
-        }
-        else if (annotation.getName().getFQN().equals(A_FACTORYCONFIG_ADAPTER_SERVICE))
-        {
-            parseFactoryConfigurationAdapterService(annotation);
-        }
-        else if (annotation.getName().getFQN().equals(A_INIT))
-        {
+            checkAlreadyDeclaredSingleAnnot(() -> m_initMethod, "@Init");
             m_initMethod = m_method;
         } 
-        else if (annotation.getName().getFQN().equals(A_START))
+        else if (name.equals(A_START))
         {
+            checkAlreadyDeclaredSingleAnnot(() -> m_startMethod, "@Start");
             m_startMethod = m_method;
         } 
-        else if (annotation.getName().getFQN().equals(A_REGISTERED))
+        else if (name.equals(A_REGISTERED))
         {
+            checkAlreadyDeclaredSingleAnnot(() -> m_registeredMethod, "@Registered");
             m_registeredMethod = m_method;
         }
-        else if (annotation.getName().getFQN().equals(A_STOP))
+        else if (name.equals(A_STOP))
         {
+            checkAlreadyDeclaredSingleAnnot(() -> m_stopMethod, "@Stop");
             m_stopMethod = m_method;
         }
-        else if (annotation.getName().getFQN().equals(A_UNREGISTERED))
+        else if (name.equals(A_UNREGISTERED))
         {
+            checkAlreadyDeclaredSingleAnnot(() -> m_unregisteredMethod, "@Unregistered");
             m_unregisteredMethod = m_method;
         }
-        else if (annotation.getName().getFQN().equals(A_DESTROY))
+        else if (name.equals(A_DESTROY))
         {
+            checkAlreadyDeclaredSingleAnnot(() -> m_destroyMethod, "@Destroy");
             m_destroyMethod = m_method;
         }
-        else if (annotation.getName().getFQN().equals(A_COMPOSITION))
+        else if (name.equals(A_COMPOSITION))
         {
+            checkAlreadyDeclaredSingleAnnot(() -> m_compositionMethod, "@Composition");
             Patterns.parseMethod(m_method, m_descriptor, Patterns.COMPOSITION);
             m_compositionMethod = m_method;
-        } else if (annotation.getName().getFQN().equals(A_LIFCLE_CTRL)) 
+        } 
+        else if (name.equals(A_LIFCLE_CTRL)) 
         {
             parseLifecycleAnnotation(annotation);
         }
-        else if (annotation.getName().getFQN().equals(A_SERVICE_DEP))
+        else if (name.equals(A_SERVICE_DEP))
         {
             parseServiceDependencyAnnotation(annotation);
         }
-        else if (annotation.getName().getFQN().equals(A_CONFIGURATION_DEPENDENCY))
+        else if (name.equals(A_CONFIGURATION_DEPENDENCY))
         {
             parseConfigurationDependencyAnnotation(annotation);
         }
-        else if (annotation.getName().getFQN().equals(A_BUNDLE_DEPENDENCY))
+        else if (name.equals(A_BUNDLE_DEPENDENCY))
         {
             parseBundleDependencyAnnotation(annotation);
         }
-        else if (annotation.getName().getFQN().equals(A_RESOURCE_DEPENDENCY))
-        {
-            parseRersourceDependencyAnnotation(annotation);
-        } 
-        else if (annotation.getName().getFQN().equals(A_INJECT))
+        else if (name.equals(A_INJECT))
         {
             parseInject(annotation);
         } 
-        else if (annotation.getName().getFQN().equals(A_REPEATABLE_PROPERTY))
+        else if (name.equals(A_REPEATABLE_PROPERTY))
         {
             parseRepeatableProperties(annotation);
         } 
@@ -291,29 +415,48 @@ public class AnnotationCollector extends ClassDataCollector
         {
         	m_singleProperty = annotation;
         } 
+        else {
+			handlePossibleComponentPropertyAnnotation(annotation);
+        }
     }
 
-    /**
+	/**
      * Finishes up the class parsing. This method must be called once the parseClassFileWithCollector method has returned.
      * @return true if some annotations have been parsed, false if not.
      */
     public boolean finish()
     {
-        if (m_writers.size() == 0)
-        {
-            m_logger.info("No components found for class " + m_className);
+        m_logger.info("finish %s", m_componentClassName);           
+
+        // check if we have a component (or adapter) annotation.                
+        Optional<EntryWriter> componentWriter = m_writers.stream()
+            .filter(writer -> m_componentTypes.indexOf(writer.getEntryType()) != -1)
+            .findFirst();
+        
+        if (! componentWriter.isPresent() || m_writers.size() == 0) {
+            m_logger.info("No components found for class %s", m_componentClassName);
             return false;
         }
+        
+        finishComponentAnnotation(componentWriter.get());
+                        
+        // log all meta data for component annotations, dependencies, etc ...
+        StringBuilder sb = new StringBuilder();
+        sb.append("Parsed annotation for class ");
+        sb.append(m_componentClassName);
+        for (int i = m_writers.size() - 1; i >= 0; i--)
+        {
+            sb.append("\n\t").append(m_writers.get(i).toString());
+        }
+        m_logger.info(sb.toString());
+        return true;
+    }
+    
+    private void finishComponentAnnotation(EntryWriter componentWriter) {
+        // Register previously parsed Init/Start/Stop/Destroy/Composition annotations
+        addCommonServiceParams(componentWriter);
 
-        // We must have at least a valid component annotation type (component, aspect, or adapters)
-        
-        EntryWriter componentWriter = m_writers.stream()
-            .filter(writer -> m_componentTypes.indexOf(writer.getEntryType()) != -1)
-            .findFirst()
-            .orElseThrow(() -> new IllegalStateException(": the class " + m_className + " must be annotated with either one of the following types: " + m_componentTypes));                   
-        
-        // Add any repeated @Property annotations to the component (or to the aspect, or adapter).
-                
+        // Add any repeated @Property annotations to the component (or to the aspect, or adapter).                
         if (m_repeatableProperty != null)
         {
             Object[] properties = m_repeatableProperty.get("value");
@@ -324,35 +467,136 @@ public class AnnotationCollector extends ClassDataCollector
             }
         }
         
-        // Handle a single Property declared on the component type (in this case, there is no @Repeatable annotation).
+        // handle component property types
+        parseComponentPropertyAnnotation(componentWriter);
         
+        // Handle a single Property declared on the component type (in this case, there is no @Repeatable annotation).        
         if (m_singleProperty != null) {
             parseProperty(m_singleProperty, componentWriter);
         }
         
-        StringBuilder sb = new StringBuilder();
-        sb.append("Parsed annotation for class ");
-        sb.append(m_className);
-        for (int i = m_writers.size() - 1; i >= 0; i--)
-        {
-            sb.append("\n\t").append(m_writers.get(i).toString());
+        if (componentWriter.getEntryType() == EntryType.FactoryConfigurationAdapterService) {
+        	m_logger.debug("finishFactoryComponent ...");
+        	finishFactoryComponent(componentWriter);        	
         }
-        m_logger.info(sb.toString());
-        return true;
     }
 
     /**
+     * Finish to parse a Factory Pid Component annotation.
+     * @param componentWriter the datastructure which holds the parsed annotation attributes.
+     */
+    private void finishFactoryComponent(EntryWriter componentWriter) {
+        
+    	if (componentWriter.getParameter(EntryParam.configType) == null) {
+    		// No configtype defined in the annotation, then try to detect if the method signature contains some config types.
+    		// First, see if there is an updated callback without a config type:    		
+    		String method = componentWriter.getParameter(EntryParam.updated).toString(); // can't be null
+    		List<Descriptors.Descriptor> methodSigs = m_methods.get(method);
+    		if (methodSigs == null) {
+    			throw new IllegalStateException("can't find callback " + method + " on class" +  m_componentClassName);
+    		}
+    		boolean parseConfigTypesFromArgs = true; 
+    		for (Descriptors.Descriptor desc : methodSigs) {
+    			Matcher m = Patterns.UPDATED_NO_CONFIG_TYPES.matcher(desc.toString());
+    			if (m.matches()) {
+    				// Found an updated callback which does not contain any config type
+    				m_logger.debug("updated callback %s does not contain any config type in accepted arguments", method); 
+    				parseConfigTypesFromArgs = false;
+    				break;
+    			}
+    		}
+    		// Now, try to find an updated callback having some config types accepted as arguments
+    		if (parseConfigTypesFromArgs) {
+				for (Descriptors.Descriptor desc : methodSigs) {
+					Matcher m = Patterns.UPDATED_CONFIG_TYPES.matcher(desc.toString());
+					String[] configTypes = parsePossibleConfigTypesFromUpdatedCallback(componentWriter,
+							desc.toString());
+					if (configTypes.length > 0) {
+						// If factory pid not specified, derive the factory pid from the config type
+						// (and if only one config type is specified)
+						if (componentWriter.getParameter(EntryParam.factoryPid) == null) {
+							if (configTypes.length == 1) {
+								componentWriter.put(EntryParam.factoryPid, configTypes[0]);
+							}
+						}
+						break;
+					}
+				}
+    		}
+    	}	
+    	
+    	// set factory pid to component class name if it has not been derived from any annotation attributes or from updated callback parameters.
+		if (componentWriter.getParameter(EntryParam.factoryPid) == null) {
+			componentWriter.put(EntryParam.factoryPid, m_componentClassName);
+		}
+	}
+    
+    /**
+     * Auto Detect if an updated callback method contains some configuration types.
+     * @param writer the writer where the detected configration types are written in case some are detected
+     * @param callbackDescriptor the descriptor of the udpated callback method.
+     * @param propagateConfigTypeDefVal true if any found config type default values should be parsed and propagated to service properties
+     * @return an empty string array in case no config types has been detected, or the array of parsed config types.
+     */
+    private String[] parsePossibleConfigTypesFromUpdatedCallback(EntryWriter writer, String callbackDescriptor) {
+		Matcher m = Patterns.UPDATED_CONFIG_TYPES.matcher(callbackDescriptor);
+		List<String> types = new ArrayList<>();
+		while (m.find()) {
+			String type = m.group(5);
+			if (type != null) {
+				m_logger.debug("checking if type %s is an interface or an annotation", type);
+				TypeRef typeRef = m_analyzer.getTypeRef(type);
+				try {
+					Clazz clazz = m_analyzer.findClass(typeRef);
+					if (! clazz.isAnnotation() && ! clazz.isInterface()) {
+						m_logger.debug("ignoring updated callback signature %s (argument type not an interface or an annotation", callbackDescriptor);
+						continue;
+					}
+					types.add(type.replace("/", "."));
+		                
+					/*
+					if (propagateConfigTypeDefVal) {
+					    // set component service properties with config type default values
+					    if (clazz.isAnnotation()) {
+					        clazz.parseClassFileWithCollector (new ComponentPropertyTypeDataCollector(writer));
+					    }
+					}
+					*/
+				} catch (Exception e) {
+					throw new IllegalStateException("could not find config type class " + type);
+				}
+			}
+		}
+		if (types.size() > 0) {
+			m_logger.debug("detected config types for updated callback %s", types);
+			if (types.size() == 1) {
+				writer.put(EntryParam.configType, types.get(0));
+			} else {
+				writer.put(EntryParam.configTypes, types);
+			}
+			return types.stream().toArray(String[]::new);
+		}
+		return EMPTY_STRING_ARRAY;
+    }
+
+	/**
      * Writes the generated component descriptor in the given print writer.
-     * The first line must be the service (@Service or AspectService).
+     * The first line must be the component descriptor (@Component or AspectService, etc ..).
      * @param pw the writer where the component descriptor will be written.
      */
     public void writeTo(PrintWriter pw)
     {
-        // The last element our our m_writers list contains either the Service, or the AspectService descriptor.
-        for (int i = m_writers.size() - 1; i >= 0; i--)
-        {
-            pw.println(m_writers.get(i).toString());
-        }
+        // write first the component descriptor (@Component, @AspectService, ...)
+        EntryWriter componentWriter = m_writers.stream()
+            .filter(writer -> m_componentTypes.indexOf(writer.getEntryType()) != -1)
+            .findFirst()
+            .orElseThrow(() -> new IllegalStateException("Component type not found while scanning class " + m_componentClassName));
+        pw.println(componentWriter);
+            
+        // and write other component descriptors (dependencies, and other annotations)
+        m_writers.stream()
+            .filter(writer -> m_componentTypes.indexOf(writer.getEntryType()) == -1)
+            .forEach(dependency -> pw.println(dependency.toString()));        
     }
         
     /**
@@ -384,19 +628,34 @@ public class AnnotationCollector extends ClassDataCollector
         m_repeatableProperty = repeatedProperties;
     }
     
+    /**
+     * Checks double declaration of an annotation, which normally must be declared only one time. 
+     * @param field the field supplier (if not null, means the annotation is already declared)
+     * @param annot the annotation name.
+     * @throws IllegalStateException if annotation is already declared.
+     */
+    private void checkAlreadyDeclaredSingleAnnot(Supplier<Object> field, String annot) {
+        if (field.get() != null) {
+            throw new IllegalStateException("detected multiple " + annot + " annotation from class " + m_currentClassName + " (on from child classes)");
+        }
+    }
+    
     private void parseComponentAnnotation(Annotation annotation)
     {
+    	String factoryPid = annotation.get(EntryParam.factoryPid.toString());
+    	if (factoryPid != null) {
+    		parseFactoryComponent(annotation);
+    		return;
+    	}
+    	
         EntryWriter writer = new EntryWriter(EntryType.Component);
         m_writers.add(writer);
 
-        // Register previously parsed annotations common to services (Init/Start/...)
-        addCommonServiceParams(writer);
-
         // impl attribute
-        writer.put(EntryParam.impl, m_className);
+        writer.put(EntryParam.impl, m_componentClassName);
 
-        // properties attribute
-        parseProperties(annotation, writer);
+        // Parse Adapter properties, and other params common to all kind of component
+        parseCommonComponentAttributes(annotation, writer);
 
         // provides attribute.
         if (writer.putClassArray(annotation, EntryParam.provides, m_interfaces, m_exportService) == 0)
@@ -405,38 +664,12 @@ public class AnnotationCollector extends ClassDataCollector
             // and raise an error if true.
             checkRegisteredUnregisteredNotPresent();
         }
-
-        // factorySet attribute (deprecated, replaced by factoryName)
-        String factorySetName = writer.putString(annotation, EntryParam.factorySet, null);
-        if (factorySetName != null)
-        {
-            // When a component defines a factorySet, it means that a java.util.Set will 
-            // be provided into the OSGi registry, in order to let anoter component add
-            // some component instance configurations into it.
-            // So, we have to indicate that the Set is provided as a service, in the Export-Serviec
-            // header.
-            m_exportService.add("java.util.Set");
-        }
-
-        // factoryName attribute
-        String factoryName = writer.putString(annotation, EntryParam.factoryName, null);
-        if (factoryName != null)
-        {
-            // When a component defines a factoryName, it means that a ComponentFactory will 
-            // be provided into the OSGi registry, in order to let another component create some component instances.
-            // So, we have to indicate that the ComponentFactory is provided as a service, in the Export-Serviec
-            // header.
-            m_exportService.add("org.apache.felix.dependencymanager.runtime.api.ComponentFactory");
-        }
-
-        // factoryConfigure attribute
-        writer.putString(annotation, EntryParam.factoryConfigure, null);
         
         // factoryMethod attribute
         writer.putString(annotation, EntryParam.factoryMethod, null);
     }
 
-    private void addCommonServiceParams(EntryWriter writer)
+	private void addCommonServiceParams(EntryWriter writer)
     {
         if (m_initMethod != null)
         {
@@ -484,7 +717,7 @@ public class AnnotationCollector extends ClassDataCollector
             if (m_starter == null)
             {
                 throw new IllegalArgumentException("Can't use a @LifecycleController annotation for stopping a service without declaring a " +
-                                                   "@LifecycleController that starts the component in class " + m_className);
+                                                   "@LifecycleController that starts the component in class " + m_currentClassName);
             }
         }   
 
@@ -502,8 +735,33 @@ public class AnnotationCollector extends ClassDataCollector
         {
             writer.put(EntryParam.componentField, m_componentField);
         }
+
+        if (m_registrationField != null)
+        {
+            writer.put(EntryParam.registrationField, m_registrationField);
+        }
+        
+        if (m_bundleField != null)
+        {
+        	Object scope = writer.getParameter(EntryParam.scope);
+        	if (scope == null || scope == ServiceScope.SINGLETON.name()) {
+        		throw new IllegalStateException("can't inject a bundle field on a component without prototype or bundle scope");
+        	}        	
+            writer.put(EntryParam.bundle, m_bundleField);
+        }
     }
 
+    /**
+     * Check if a dependency is already declared in another same bindMethod (or class field) on another child class.
+     */
+    private void checkDependencyAlreadyDeclaredInChild(Annotation annotation, String methodOrField, boolean method) {
+        if (! m_baseClass && m_bindMethods.contains(methodOrField + "/" + m_descriptor)) {
+            throw new IllegalStateException("Annotation " + annotation.getName().getShortName()
+                + " declared on " + m_currentClassName + "." + methodOrField + (method ? " method" : " field") + " is already declared in child classe(s)");
+        }
+        m_bindMethods.add(methodOrField + "/" + m_descriptor);
+    }
+    
     /**
      * Parses a ServiceDependency Annotation.
      * @param annotation the ServiceDependency Annotation.
@@ -511,6 +769,8 @@ public class AnnotationCollector extends ClassDataCollector
     private void parseServiceDependencyAnnotation(Annotation annotation)
     {
         EntryWriter writer = new EntryWriter(EntryType.ServiceDependency);
+        boolean doDereference = true; // false means dependency manager must not internally dereference the service dependency
+        
         m_writers.add(writer);
 
         // service attribute
@@ -519,18 +779,34 @@ public class AnnotationCollector extends ClassDataCollector
         {
             if (m_isField)
             {
-                service = Patterns.parseClass(m_descriptor, Patterns.CLASS, 1);
+                checkDependencyAlreadyDeclaredInChild(annotation, m_field, false);
+                //service = Patterns.parseClass(m_descriptor, Patterns.CLASS, 1);
+                m_logger.debug("parsing field service type %s", m_field);
+                service = FieldTypeGetter.determineFieldType(m_logger, m_fieldDef);
+                m_logger.debug("field service type=%s", service);
             }
             else
             {
+                // if we are parsing some inherited classes, detect if the bind method is already declared in child classes
+                checkDependencyAlreadyDeclaredInChild(annotation, m_method, true);   
+                
             	// parse "bind(Component, ServiceReference, Service)" signature
             	service = Patterns.parseClass(m_descriptor, Patterns.BIND_CLASS1, 3, false);            		
             	
             	if (service == null) {
                 	// parse "bind(Component, Service)" signature
-                	service = Patterns.parseClass(m_descriptor, Patterns.BIND_CLASS2, 2, false);            		
+                	service = Patterns.parseClass(m_descriptor, Patterns.BIND_CLASS2, 2, false);    		
             	}
             	
+            	if (service == null) {
+            		// parse "bind(ServiceReference<T>)" or "bind(ServiceObjects<T>)" signatures
+                	service = Patterns.inferTypeFromGenericType(m_methodDef.getDescriptor().toString(), 
+                												m_methodDef.getSignature(),
+                												m_logger);
+                	// dm must not internally dereference the service, since it is injected as a ServiceRef or a ServiceObjects
+                	doDereference = false;
+            	}
+
             	if (service == null) {
             		// parse "bind(Component, Map, Service)" signature
                 	service = Patterns.parseClass(m_descriptor, Patterns.BIND_CLASS3, 3, false);            		
@@ -564,8 +840,13 @@ public class AnnotationCollector extends ClassDataCollector
             	if (service == null) {
             		// parse "bind(Dictionary, Service)" signature
                 	service = Patterns.parseClass(m_descriptor, Patterns.BIND_CLASS9, 2, true);            		
-            	}
+            	}            	
             }
+        }
+        
+        boolean matchAnyService = service != null && service.equals(ServiceDependency.Any.class.getName());
+        if (matchAnyService) {
+        	service = null;
         }
         writer.put(EntryParam.service, service);
 
@@ -583,6 +864,12 @@ public class AnnotationCollector extends ClassDataCollector
         if (filter != null)
         {
             Verifier.verifyFilter(filter, 0);
+            if (matchAnyService) {
+            	filter = "(&(objectClass=*)" + filter + ")";
+            }
+            writer.put(EntryParam.filter, filter);
+        } else if (matchAnyService) {
+        	filter = "(objectClass=*)";
             writer.put(EntryParam.filter, filter);
         }
 
@@ -597,7 +884,7 @@ public class AnnotationCollector extends ClassDataCollector
         Long t = (Long) annotation.get(EntryParam.timeout.toString());
         if (t != null && t.longValue() < -1)
         {
-            throw new IllegalArgumentException("Invalid timeout value " + t + " in ServiceDependency annotation from class " + m_className);
+            throw new IllegalArgumentException("Invalid timeout value " + t + " in ServiceDependency annotation from class " + m_currentClassName);
         }
         
         // required attribute (not valid if parsing a temporal service dependency)
@@ -609,11 +896,17 @@ public class AnnotationCollector extends ClassDataCollector
         // removed callback
         writer.putString(annotation, EntryParam.removed, null); 
         
+        // swap callback
+        writer.putString(annotation, EntryParam.swap, null); 
+
         // name attribute
         parseDependencyName(writer, annotation);
         
         // propagate attribute
         writer.putString(annotation, EntryParam.propagate, null);
+        
+        // dereference flag
+        writer.putString(annotation, EntryParam.dereference, String.valueOf(doDereference));
     }
         
     /**
@@ -646,76 +939,51 @@ public class AnnotationCollector extends ClassDataCollector
      * Parses a ConfigurationDependency annotation.
      * @param annotation the ConfigurationDependency annotation.
      */
-    private void parseConfigurationDependencyAnnotation(Annotation annotation)
-    {
+    private void parseConfigurationDependencyAnnotation(Annotation annotation) {
+        checkDependencyAlreadyDeclaredInChild(annotation, m_method, true);
+
         EntryWriter writer = new EntryWriter(EntryType.ConfigurationDependency);
         m_writers.add(writer);
-
-        // The pid is either:
-        //
-        // - the fqdn of the configuration proxy type, if the callback accepts an interface (not a Dictionary).
-        // - or the fqdn of the class specified by the pidFromClass attribute 
-        // - or the value of the pid attribute
-        // - or by default the fdqn of the class where the annotation is found
-
-        String pidFromClass = parseClassAttrValue(annotation.get(EntryParam.pidClass.toString()));
-        String pid = pidFromClass != null ? pidFromClass : get(annotation, EntryParam.pid.toString(), null);
-
-        // Check if annotation is applied on "updated(ConfigProxyType)"
-        String confProxyType =   Patterns.parseClass(m_descriptor, Patterns.BIND_CLASS5, 1, false);
-        if (confProxyType != null)
-        {
-            if (! Dictionary.class.getName().equals(confProxyType)) 
-            {
-                // It's a conf proxy type.
-                writer.put(EntryParam.configType, confProxyType);
-            }
-            else
-            {
-                confProxyType = null;
-            }
-            
-        } 
-        else
-        {
-            // Check if annotation is applied on "updated(Component, ConfigProxyType)"
-            confProxyType = Patterns.parseClass(m_descriptor, Patterns.BIND_CLASS2, 2, false); 
-            if (! Dictionary.class.getName().equals(confProxyType)) 
-            {
-                // It's a conf proxy type.
-                writer.put(EntryParam.configType, confProxyType);
-            }
-            else
-            {
-                confProxyType = null;
-            }
-        }
         
-        if (pid == null) 
-        {
-            if (confProxyType != null)
-            {
-                pid = confProxyType;
-            }
-            else 
-            {
-                pid = m_className;
-            }
-        }
-
-        writer.put(EntryParam.pid, pid);
-        
-        // the method on which the annotation is applied
-        writer.put(EntryParam.updated, m_method);
-
         // propagate attribute
         writer.putString(annotation, EntryParam.propagate, null);
         
         // required flag (true by default)
         writer.putString(annotation, EntryParam.required, Boolean.TRUE.toString());
+        
+        // Parse possible config types specified in the updated callback.
+    	// First, check if the update callback does not contain any config type parameters
+        String[] configTypes = EMPTY_STRING_ARRAY;
+    	Matcher m = Patterns.UPDATED_NO_CONFIG_TYPES.matcher(m_descriptor.toString());
+    	if (! m.matches()) {
+    		// the updated callback may contain some configuration types.
+    		configTypes = parsePossibleConfigTypesFromUpdatedCallback(writer, m_descriptor);
+    	}
 
-        // Property Meta Types
-        parseMetaTypes(annotation, pid, false);
+        // Calculate the the pid, which value is either:
+        //
+        // - the value of the pid attribute, if specified        
+        // - or the fqdn of the class specified by the pidFromClass attribute, if specified 
+        // - or the fqdn of one configuration proxy type found from the updated callback method (if multiple config types are specified in the callback,
+        //   then we can't derive the pid)
+        // - or by default the fdqn of the class where the annotation is found
+        String pid = get(annotation, EntryParam.pid.toString(), null);
+        if (pid == null) {
+        	pid = parseClassAttrValue(annotation.get(EntryParam.pidClass.toString()));
+        }
+        if (pid == null) {
+        	if (configTypes.length == 1) {
+        		pid = configTypes[0];
+        	}
+        }
+		if (pid == null) {
+			pid = m_componentClassName;
+		}
+
+        writer.put(EntryParam.pid, pid);
+        
+        // the method on which the annotation is applied
+        writer.put(EntryParam.updated, m_method);
         
         // name attribute
         parseDependencyName(writer, annotation);
@@ -730,9 +998,6 @@ public class AnnotationCollector extends ClassDataCollector
         EntryWriter writer = new EntryWriter(EntryType.AspectService);
         m_writers.add(writer);
 
-        // Register previously parsed Init/Start/Stop/Destroy/Composition annotations
-        addCommonServiceParams(writer);
-
         // Parse service filter
         String filter = annotation.get(EntryParam.filter.toString());
         if (filter != null)
@@ -746,10 +1011,10 @@ public class AnnotationCollector extends ClassDataCollector
         writer.put(EntryParam.ranking, ranking.toString());
 
         // Generate Aspect Implementation
-        writer.put(EntryParam.impl, m_className);
+        writer.put(EntryParam.impl, m_componentClassName);
 
-        // Parse Aspect properties.
-        parseProperties(annotation, writer);
+        // Parse Adapter properties, and other params common to all kind of component
+        parseCommonComponentAttributes(annotation, writer);
         
         // Parse field/added/changed/removed attributes
         parseAspectOrAdapterCallbackMethods(annotation, writer);
@@ -761,13 +1026,13 @@ public class AnnotationCollector extends ClassDataCollector
             if (m_interfaces == null)
             {
                 throw new IllegalStateException("Invalid AspectService annotation: " +
-                    "the service attribute has not been set and the class " + m_className
+                    "the service attribute has not been set and the class " + m_componentClassName
                     + " does not implement any interfaces");
             }
             if (m_interfaces.length != 1)
             {
                 throw new IllegalStateException("Invalid AspectService annotation: " +
-                    "the service attribute has not been set and the class " + m_className
+                    "the service attribute has not been set and the class " + m_componentClassName
                     + " implements more than one interface");
             }
 
@@ -793,7 +1058,7 @@ public class AnnotationCollector extends ClassDataCollector
         // "field" and "added/changed/removed/swap" attributes can't be mixed
         if (field != null && (added != null || changed != null || removed != null || swap != null))
         {
-            throw new IllegalStateException("Annotation " + annotation + "can't applied on " + m_className
+            throw new IllegalStateException("Annotation " + annotation + "can't applied on " + m_componentClassName
                     + " can't mix \"field\" attribute with \"added/changed/removed\" attributes");
         }
                 
@@ -816,11 +1081,8 @@ public class AnnotationCollector extends ClassDataCollector
         EntryWriter writer = new EntryWriter(EntryType.AdapterService);
         m_writers.add(writer);
 
-        // Register previously parsed Init/Start/Stop/Destroy/Composition annotations
-        addCommonServiceParams(writer);
-
         // Generate Adapter Implementation
-        writer.put(EntryParam.impl, m_className);
+        writer.put(EntryParam.impl, m_componentClassName);
 
         // Parse adaptee filter
         String adapteeFilter = annotation.get(EntryParam.adapteeFilter.toString());
@@ -833,8 +1095,8 @@ public class AnnotationCollector extends ClassDataCollector
         // Parse the mandatory adapted service interface.
         writer.putClass(annotation, EntryParam.adapteeService);
 
-        // Parse Adapter properties.
-        parseProperties(annotation, writer);
+        // Parse Adapter properties, and other params common to all kind of component
+        parseCommonComponentAttributes(annotation, writer);
 
         // Parse the provided adapter service (use directly implemented interface by default).
         if (writer.putClassArray(annotation, EntryParam.provides, m_interfaces, m_exportService) == 0)
@@ -862,11 +1124,8 @@ public class AnnotationCollector extends ClassDataCollector
         EntryWriter writer = new EntryWriter(EntryType.BundleAdapterService);
         m_writers.add(writer);
 
-        // Register previously parsed Init/Start/Stop/Destroy/Composition annotations
-        addCommonServiceParams(writer);
-
         // Generate Adapter Implementation
-        writer.put(EntryParam.impl, m_className);
+        writer.put(EntryParam.impl, m_componentClassName);
 
         // Parse bundle filter
         String filter = annotation.get(EntryParam.filter.toString());
@@ -880,8 +1139,8 @@ public class AnnotationCollector extends ClassDataCollector
         writer.putString(annotation, EntryParam.stateMask, Integer.valueOf(
             Bundle.INSTALLED | Bundle.RESOLVED | Bundle.ACTIVE).toString());
 
-        // Parse Adapter properties.
-        parseProperties(annotation, writer);
+        // Parse Adapter properties, and other params common to all kind of component
+        parseCommonComponentAttributes(annotation, writer);
 
         // Parse the optional adapter service (use directly implemented interface by default).
         if (writer.putClassArray(annotation, EntryParam.provides, m_interfaces, m_exportService) == 0)
@@ -897,77 +1156,25 @@ public class AnnotationCollector extends ClassDataCollector
     }
 
     /**
-     * Parses a BundleAdapterService annotation.
+     * Parses a Factory Pid Component 
      * @param annotation
      */
-    private void parseResourceAdapterService(Annotation annotation)
-    {
-        EntryWriter writer = new EntryWriter(EntryType.ResourceAdapterService);
-        m_writers.add(writer);
-
-        // Register previously parsed Init/Start/Stop/Destroy/Composition annotations
-        addCommonServiceParams(writer);
-
-        // Generate Adapter Implementation
-        writer.put(EntryParam.impl, m_className);
-
-        // Parse resource filter
-        String filter = annotation.get(EntryParam.filter.toString());
-        if (filter != null)
-        {
-            Verifier.verifyFilter(filter, 0);
-            writer.put(EntryParam.filter, filter);
-        }
-
-        // Parse Adapter properties.
-        parseProperties(annotation, writer);
-
-        // Parse the provided adapter service (use directly implemented interface by default).
-        if (writer.putClassArray(annotation, EntryParam.provides, m_interfaces, m_exportService) == 0)
-        {
-            checkRegisteredUnregisteredNotPresent();
-        }
-
-        // Parse propagate attribute
-        writer.putString(annotation, EntryParam.propagate, Boolean.FALSE.toString());
-        
-        // Parse changed attribute
-        writer.putString(annotation, EntryParam.changed, null);
-    }
-
-    /**
-     * Parses a Factory Configuration Adapter annotation.
-     * @param annotation
-     */
-    private void parseFactoryConfigurationAdapterService(Annotation annotation)
+    private void parseFactoryComponent(Annotation annotation)
     {
         EntryWriter writer = new EntryWriter(EntryType.FactoryConfigurationAdapterService);
         m_writers.add(writer);
 
-        // Register previously parsed Init/Start/Stop/Destroy/Composition annotations
-        addCommonServiceParams(writer);
-
         // Generate Adapter Implementation
-        writer.put(EntryParam.impl, m_className);
+        writer.put(EntryParam.impl, m_componentClassName);
+                       
+        String factoryPid = get(annotation, EntryParam.factoryPid.toString(), null);
 
-        // factory pid attribute (can be specified using the factoryPid attribute, or using the factoryPidClass attribute)
-        String factoryPidClass = parseClassAttrValue(annotation.get(EntryParam.factoryPidClass.toString()));
-        
-        // Test if a type safe configuration type is provided.
-        String configType = parseClassAttrValue(annotation.get(EntryParam.configType.toString()));
-        
-        if (configType != null) {
-            writer.put(EntryParam.configType, configType);
+        if (factoryPid != null) {
+        	writer.put(EntryParam.factoryPid, factoryPid);
+        } else {
+        	// The finishFactoryComponent will set later the factoryPid (either to a config type specified in the updated callback, 
+        	// or to the component class name). See  finishFactoryComponent() method.
         }
-        
-        String factoryPid = null;
-        
-        factoryPid = get(annotation, EntryParam.factoryPid.toString(), factoryPidClass);
-        if (factoryPid == null) {
-            factoryPid = configType != null ? configType : m_className;
-        }
-        
-        writer.put(EntryParam.factoryPid, factoryPid);
 
         // Parse updated callback
         writer.putString(annotation, EntryParam.updated, "updated");
@@ -981,18 +1188,18 @@ public class AnnotationCollector extends ClassDataCollector
             checkRegisteredUnregisteredNotPresent();
         }
 
-        // Parse Adapter properties.
-        parseProperties(annotation, writer);
-
-        // Parse optional meta types for configuration description.
-        parseMetaTypes(annotation, factoryPid, true);
+        // Parse Adapter properties, and other params common to all kind of component
+        parseCommonComponentAttributes(annotation, writer);
         
         // Parse factoryMethod attribute
         writer.putString(annotation, EntryParam.factoryMethod, null);
+        m_logger.debug("Parsed factory configuration adapter annotations, methods=%s", m_methods);
     }
 
     private void parseBundleDependencyAnnotation(Annotation annotation)
     {
+        checkDependencyAlreadyDeclaredInChild(annotation, m_method, true);
+
         EntryWriter writer = new EntryWriter(EntryType.BundleDependency);
         m_writers.add(writer);
 
@@ -1012,32 +1219,6 @@ public class AnnotationCollector extends ClassDataCollector
         parseDependencyName(writer, annotation);
     }
 
-    private void parseRersourceDependencyAnnotation(Annotation annotation)
-    {
-        EntryWriter writer = new EntryWriter(EntryType.ResourceDependency);
-        m_writers.add(writer);
-
-        String filter = annotation.get(EntryParam.filter.toString());
-        if (filter != null)
-        {
-            Verifier.verifyFilter(filter, 0);
-            writer.put(EntryParam.filter, filter);
-        }
-        
-        if (m_isField)
-        {
-            writer.put(EntryParam.autoConfig, m_field);
-        }
-
-        writer.putString(annotation, EntryParam.added, (!m_isField) ? m_method : null);
-        writer.putString(annotation, EntryParam.changed, null);
-        writer.putString(annotation, EntryParam.removed, null);
-        writer.putString(annotation, EntryParam.required, null);
-        writer.putString(annotation, EntryParam.propagate, null);
-        writer.putString(annotation, EntryParam.factoryMethod, null);
-        parseDependencyName(writer, annotation);
-    }
-
     /**
      * Parse the name of a given dependency.
      * @param writer The writer where to write the dependency name
@@ -1050,7 +1231,7 @@ public class AnnotationCollector extends ClassDataCollector
         {
             if(! m_dependencyNames.add(name))
             {
-                throw new IllegalArgumentException("Duplicate dependency name " + name + " in Dependency " + annotation + " from class " + m_className);
+                throw new IllegalArgumentException("Duplicate dependency name " + name + " in Dependency " + annotation + " from class " + m_currentClassName);
             }
             writer.put(EntryParam.name, name);
         }
@@ -1063,80 +1244,21 @@ public class AnnotationCollector extends ClassDataCollector
         {
             if (m_starter != null) {
                 throw new IllegalStateException("Lifecycle annotation already defined on field " + 
-                                                m_starter + " in class " + m_className);
+                                                m_starter + " in class (or super class of) " + m_componentClassName);
             }
             m_starter = m_field;
         } else {
             if (m_stopper != null) {
                 throw new IllegalStateException("Lifecycle annotation already defined on field " + 
-                                                m_stopper + " in class " + m_className);
+                                                m_stopper + " in class (or super class of) " + m_componentClassName);
             }
             m_stopper = m_field;
         }
     }
 
     /**
-     * Parse optional meta types annotation attributes
-     * @param annotation
-     */
-    private void parseMetaTypes(Annotation annotation, String pid, boolean factory)
-    {
-        if (annotation.get("metadata") != null)
-        {
-            String propertiesHeading = annotation.get("heading");
-            String propertiesDesc = annotation.get("description");
-
-            MetaType.OCD ocd = new MetaType.OCD(pid, propertiesHeading, propertiesDesc);
-            for (Object p: (Object[]) annotation.get("metadata"))
-            {
-                Annotation property = (Annotation) p;
-                String heading = property.get("heading");
-                String id = property.get("id");
-                String type = parseClassAttrValue(property.get("type"));
-                Object[] defaults = (Object[]) property.get("defaults");
-                String description = property.get("description");
-                Integer cardinality = property.get("cardinality");
-                Boolean required = property.get("required");
-
-                MetaType.AD ad = new MetaType.AD(id, type, defaults, heading, description,
-                    cardinality, required);
-
-                Object[] optionLabels = property.get("optionLabels");
-                Object[] optionValues = property.get("optionValues");
-
-                if (optionLabels == null
-                    && optionValues != null
-                    ||
-                    optionLabels != null
-                    && optionValues == null
-                    ||
-                    (optionLabels != null && optionValues != null && optionLabels.length != optionValues.length))
-                {
-                    throw new IllegalArgumentException("invalid option labels/values specified for property "
-                        + id +
-                        " in PropertyMetadata annotation from class " + m_className);
-                }
-
-                if (optionValues != null)
-                {
-                    for (int i = 0; i < optionValues.length; i++)
-                    {
-                        ad.add(new MetaType.Option(optionValues[i].toString(), optionLabels[i].toString()));
-                    }
-                }
-
-                ocd.add(ad);
-            }
-
-            m_metaType.add(ocd);
-            MetaType.Designate designate = new MetaType.Designate(pid, factory);
-            m_metaType.add(designate);
-            m_logger.info("Parsed MetaType Properties from class " + m_className);
-        }
-    }
-
-    /**
-     * Parses a Property annotation (which represents a list of key-value pair).
+     * Parses attributes common to all kind of components.
+     * First, Property annotation is parsed which represents a list of key-value pair.
      * The properties are encoded using the following json form:
      * 
      * properties       ::= key-value-pair*
@@ -1159,8 +1281,9 @@ public class AnnotationCollector extends ClassDataCollector
      * @param component the component annotation which contains a "properties" attribute. The component can be either a @Component, or an aspect, or an adapter.
      * @param writer the object where the parsed attributes are written.
      */
-    private void parseProperties(Annotation component, EntryWriter writer)
-    {            
+    private void parseCommonComponentAttributes(Annotation component, EntryWriter writer)
+    {        
+    	// Parse properties attribute.
         Object[] properties = component.get(EntryParam.properties.toString());
         if (properties != null)
         {
@@ -1170,6 +1293,13 @@ public class AnnotationCollector extends ClassDataCollector
                 parseProperty(propertyAnnotation, writer);
             }             
         }
+                
+        // scope attribute
+        String scope = component.get("scope");
+        if (scope == null) {
+        	scope = ServiceScope.SINGLETON.name();
+        }
+        writer.put(EntryParam.scope, scope);
     }
     
     /**
@@ -1179,86 +1309,69 @@ public class AnnotationCollector extends ClassDataCollector
      */
     private void parseProperty(Annotation property, EntryWriter writer)
     {
-        EntryParam attribute = EntryParam.properties;
-        try
-        {
-            JSONObject properties = writer.getJsonObject(attribute);
-            if (properties == null) {
-                properties = new JSONObject();
-            }
-                        
-            String name = (String) property.get("name");
-            String type = parseClassAttrValue(property.get("type"));
-            Class<?> classType;
-            try
-            {
-                classType = (type == null) ? String.class : Class.forName(type);
-            }
-            catch (ClassNotFoundException e)
-            {
-                // Theorically impossible
-                throw new IllegalArgumentException("Invalid Property type " + type
-                    + " from annotation " + property + " in class " + m_className);
-            }
+    	String name = (String) property.get("name");
+    	String type = parseClassAttrValue(property.get("type"));
+    	Class<?> classType;
+    	try
+    	{
+    		classType = (type == null) ? String.class : Class.forName(type);
+    	}
+    	catch (ClassNotFoundException e)
+    	{
+    		// Theorically impossible
+    		throw new IllegalArgumentException("Invalid Property type " + type
+    				+ " from annotation " + property + " in class " + m_componentClassName);
+    	}
 
-            Object[] values;
+    	Object[] values;
 
-            if ((values = property.get("value")) != null)
-            {
-                values = checkPropertyType(name, classType, values);
-                addProperty(properties, name, values, classType);
-            }
-            else if ((values = property.get("values")) != null)
-            { // deprecated
-                values = checkPropertyType(name, classType, values);
-                addProperty(properties, name, values, classType);
-            }
-            else if ((values = property.get("longValue")) != null)
-            {
-                addProperty(properties, name, values, Long.class);
-            }
-            else if ((values = property.get("doubleValue")) != null)
-            {
-                addProperty(properties, name, values, Double.class);
-            }
-            else if ((values = property.get("floatValue")) != null)
-            {
-                addProperty(properties, name, values, Float.class);
-            }
-            else if ((values = property.get("intValue")) != null)
-            {
-                addProperty(properties, name, values, Integer.class);
-            }
-            else if ((values = property.get("byteValue")) != null)
-            {
-                addProperty(properties, name, values, Byte.class);
-            }
-            else if ((values = property.get("charValue")) != null)
-            {
-                addProperty(properties, name, values, Character.class);
-            }
-            else if ((values = property.get("booleanValue")) != null)
-            {
-                addProperty(properties, name, values, Boolean.class);
-            }
-            else if ((values = property.get("shortValue")) != null)
-            {
-                addProperty(properties, name, values, Short.class);
-            }
-            else
-            {
-                throw new IllegalArgumentException(
-                    "Missing Property value from annotation " + property + " in class " + m_className);
-            }
-
-            if (properties.length() > 0) {
-                writer.putJsonObject(attribute, properties);
-            }
-        }
-        catch (JSONException e)
-        {
-            throw new IllegalArgumentException("Unexpected exception while parsing Property from class " + m_className, e);
-        }
+    	if ((values = property.get("value")) != null)
+    	{
+    		values = checkPropertyType(name, classType, values);
+    		writer.addProperty(name, values, classType);
+    	}
+    	else if ((values = property.get("values")) != null)
+    	{ // deprecated
+    		values = checkPropertyType(name, classType, values);
+    		writer.addProperty(name, values, classType);
+    	}
+    	else if ((values = property.get("longValue")) != null)
+    	{
+    		writer.addProperty(name, values, Long.class);
+    	}
+    	else if ((values = property.get("doubleValue")) != null)
+    	{
+    		writer.addProperty(name, values, Double.class);
+    	}
+    	else if ((values = property.get("floatValue")) != null)
+    	{
+    		writer.addProperty(name, values, Float.class);
+    	}
+    	else if ((values = property.get("intValue")) != null)
+    	{
+    		writer.addProperty(name, values, Integer.class);
+    	}
+    	else if ((values = property.get("byteValue")) != null)
+    	{
+    		writer.addProperty(name, values, Byte.class);
+    	}
+    	else if ((values = property.get("charValue")) != null)
+    	{
+    		writer.addProperty(name, values, Character.class);
+    	}
+    	else if ((values = property.get("booleanValue")) != null)
+    	{
+    		writer.addProperty(name, values, Boolean.class);
+    	}
+    	else if ((values = property.get("shortValue")) != null)
+    	{
+    		writer.addProperty(name, values, Short.class);
+    	}
+    	else
+    	{
+    		throw new IllegalArgumentException(
+    				"Missing Property value from annotation " + property + " in class " + m_componentClassName);
+    	}
     }
 
     /**
@@ -1279,7 +1392,7 @@ public class AnnotationCollector extends ClassDataCollector
                 try {
                     Long.valueOf(value.toString());
                 } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_className
+                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_componentClassName
                         + " does not contain a valid Long value (" + value.toString() + ")");
                 }
             }
@@ -1288,7 +1401,7 @@ public class AnnotationCollector extends ClassDataCollector
                 try {
                     Double.valueOf(value.toString());
                 } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_className
+                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_componentClassName
                         + " does not contain a valid Double value (" + value.toString() + ")");
                 }
             }
@@ -1297,7 +1410,7 @@ public class AnnotationCollector extends ClassDataCollector
                 try {
                     Float.valueOf(value.toString());
                 } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_className
+                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_componentClassName
                         + " does not contain a valid Float value (" + value.toString() + ")");
                 }
             }
@@ -1306,7 +1419,7 @@ public class AnnotationCollector extends ClassDataCollector
                 try {
                     Integer.valueOf(value.toString());
                 } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_className
+                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_componentClassName
                         + " does not contain a valid Integer value (" + value.toString() + ")");
                 }
             }
@@ -1315,7 +1428,7 @@ public class AnnotationCollector extends ClassDataCollector
                 try {
                     Byte.valueOf(value.toString());
                 } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_className
+                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_componentClassName
                         + " does not contain a valid Byte value (" + value.toString() + ")");
                 }
             }
@@ -1333,7 +1446,7 @@ public class AnnotationCollector extends ClassDataCollector
                     if (values[i].toString().length() != 1)
                     {
                         throw new IllegalArgumentException("Property \"" + name + "\" in class "
-                            + m_className + " does not contain a valid Character value (" + values[i] + ")");
+                            + m_componentClassName + " does not contain a valid Character value (" + values[i] + ")");
                     }
                     try
                     {
@@ -1342,7 +1455,7 @@ public class AnnotationCollector extends ClassDataCollector
                     catch (NumberFormatException e2)
                     {
                         throw new IllegalArgumentException("Property \"" + name + "\" in class "
-                            + m_className + " does not contain a valid Character value (" + values[i].toString()
+                            + m_componentClassName + " does not contain a valid Character value (" + values[i].toString()
                             + ")");
                     }
                 }
@@ -1350,7 +1463,7 @@ public class AnnotationCollector extends ClassDataCollector
         } else if (type.equals(Boolean.class)) {
             for (Object value : values) {
                 if (! value.toString().equalsIgnoreCase("false") && ! value.toString().equalsIgnoreCase("true")) {
-                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_className
+                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_componentClassName
                         + " does not contain a valid Boolean value (" + value.toString() + ")");
                 }
             }
@@ -1359,44 +1472,13 @@ public class AnnotationCollector extends ClassDataCollector
                 try {
                     Short.valueOf(value.toString());
                 } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_className
+                    throw new IllegalArgumentException("Property \"" + name + "\" in class " + m_componentClassName
                         + " does not contain a valid Short value (" + value.toString() + ")");
                 }
             }
         }
 
         return values;
-    }
-
-    /**
-     * Adds a key/value(s) pair in a properties map
-     * @param properties the target properties map
-     * @param name the property name
-     * @param value the property value(s)
-     * @param type the property type
-     * @throws JSONException 
-     */
-    private void addProperty(JSONObject props, String name, Object value, Class<?> type) throws JSONException {
-        if (value.getClass().isArray())
-        {
-            Object[] array = (Object[]) value;
-            if (array.length == 1)
-            {
-                value = array[0];
-            }
-        }
-
-        if (type.equals(String.class))
-        {
-            props.put(name, value.getClass().isArray() ? new JSONArray(value) : value);
-        }
-        else
-        {
-            JSONObject jsonValue = new JSONObject();
-            jsonValue.put("type", type.getName());
-            jsonValue.put("value", value.getClass().isArray() ? new JSONArray(value) : value);
-            props.put(name, jsonValue);
-        }
     }
 
     /**
@@ -1408,20 +1490,43 @@ public class AnnotationCollector extends ClassDataCollector
     {      
         if (Patterns.BUNDLE_CONTEXT.matcher(m_descriptor).matches())
         {
+            if (m_bundleContextField != null) {
+                throw new IllegalStateException("detected multiple @Inject annotation from class " + m_currentClassName + " (on from child classes)");
+            }
             m_bundleContextField = m_field;
         }
         else if (Patterns.DEPENDENCY_MANAGER.matcher(m_descriptor).matches())
         {
+            if (m_dependencyManagerField != null) {
+                throw new IllegalStateException("detected multiple @Inject annotation from class " + m_currentClassName + " (on from child classes)");
+            }
             m_dependencyManagerField = m_field;
         }
         else if (Patterns.COMPONENT.matcher(m_descriptor).matches())
         {
+            if (m_componentField != null) {
+                throw new IllegalStateException("detected multiple @Inject annotation from class " + m_currentClassName + " (on from child classes)");
+            }
             m_componentField = m_field;
+        }
+        else if (Patterns.SERVICE_REGISTRATION.matcher(m_descriptor).matches())
+        {
+            if (m_registrationField != null) {
+                throw new IllegalStateException("detected multiple @Inject annotation from class " + m_currentClassName + " (on from child classes)");
+            }
+            m_registrationField = m_field;
+        }
+        else if (Patterns.BUNDLE.matcher(m_descriptor).matches())
+        {
+            if (m_bundleField != null) {
+                throw new IllegalStateException("detected multiple @Inject annotation from class " + m_currentClassName + " (on from child classes)");
+            }
+            m_bundleField = m_field;
         }
         else
         {
             throw new IllegalArgumentException("@Inject annotation can't be applied on the field \"" + m_field
-                                               + "\" in class " + m_className);
+                                               + "\" in class " + m_currentClassName);
         }
     }
     
@@ -1434,14 +1539,14 @@ public class AnnotationCollector extends ClassDataCollector
         if (m_registeredMethod != null)
         {
             throw new IllegalStateException("@Registered annotation can't be used on a Component " +
-                                            " which does not provide a service (class=" + m_className + ")");
+                                            " which does not provide a service (class=" + m_currentClassName + ")");
 
         }
         
         if (m_unregisteredMethod != null)
         {
             throw new IllegalStateException("@Unregistered annotation can't be used on a Component " +
-                                            " which does not provide a service (class=" + m_className + ")");
+                                            " which does not provide a service (class=" + m_currentClassName + ")");
 
         }
     }
@@ -1460,4 +1565,316 @@ public class AnnotationCollector extends ClassDataCollector
         T value = (T) annotation.get(name);
         return value != null ? value : defaultValue;
     }
+    
+    /**
+     * Check if an annotation applied on the component class is a component property type.
+     * (the following is adapted from the original bnd DS AnnotationReader class)
+     */
+    private void handlePossibleComponentPropertyAnnotation(Annotation annotation) {
+    	m_logger.debug("Checking possible component property annotations %s", annotation);
+    	
+		try {
+			Clazz clazz = m_analyzer.findClass(annotation.getName());
+
+			if (clazz == null) {
+				m_logger.warn(
+						"Unable to determine whether the annotation %s applied to type %s is a component property type as it is not on the project build path. If this annotation is a component property type then it must be present on the build path in order to be processed",
+						annotation.getName().getFQN(), m_currentClassName);
+				return;
+			}
+
+			if (clazz.is(ANNOTATED, DS_PROPERTY_TYPE, m_analyzer) || clazz.is(ANNOTATED, DM_PROPERTY_TYPE, m_analyzer)) {
+				m_logger.debug("Found component property type %s", annotation);
+				m_componentPropertyTypes.add(annotation);
+			} else {
+	            m_logger.debug("The annotation %s on component type %s will not be used for properties as the annotation is not annotated with @ComponentPropertyType",
+						clazz.getFQN(), m_currentClassName);
+				return;
+			}
+		} catch (Exception e) {
+			m_logger.error("An error occurred when attempting to process annotation %s, applied to component %s", e, 
+					annotation.getName().getFQN(), m_currentClassName);
+		}		
+	}       
+
+    /**
+     * Parse a component property type annotation applied on the component class.
+     * (the following is adapted from the original bnd DS AnnotationReader class)
+     */
+    private void parseComponentPropertyAnnotation(EntryWriter componentWriter) {
+		for (Annotation annotation : m_componentPropertyTypes) {
+			try {
+				Clazz clazz = m_analyzer.findClass(annotation.getName());
+				if (clazz == null) {
+					m_logger.warn(
+							"Unable to determine whether the annotation %s applied to type %s is a component property type as it is not on the project build path. If this annotation is a component property type then it must be present on the build path in order to be processed",
+							annotation.getName().getFQN(), m_currentClassName);
+					continue;
+				}
+
+				m_logger.debug("Parsing component property type %s", annotation);
+				clazz.parseClassFileWithCollector(new ComponentPropertyTypeDataCollector(annotation, componentWriter));
+			} catch (Exception e) {
+				m_logger.error("An error occurred when attempting to process annotation %s, applied to component %s", e, 
+						annotation.getName().getFQN(), m_currentClassName);
+			}
+		}
+	}       
+    
+	private final class ComponentPropertyTypeDataCollector extends ClassDataCollector {
+		private final MultiMap<String,String>				props			= new MultiMap<String,String>();
+		private final Map<String,Class>					    propertyTypes	= new HashMap<>();
+		private int											hasNoDefault	= 0;
+		private boolean										hasValue		= false;
+		private boolean										hasMethods 		= false;
+		private FieldDef									prefixField		= null;
+		private TypeRef										typeRef			= null;
+		private final EntryWriter 							m_componentWriter;
+	
+		private ComponentPropertyTypeDataCollector(EntryWriter componentWriter) {
+		    m_componentWriter = componentWriter;
+		}
+
+		private ComponentPropertyTypeDataCollector(Annotation componentPropertyAnnotation, EntryWriter componentWriter) {
+			m_componentWriter = componentWriter;
+			// Add in the defined attributes
+			for (String key : componentPropertyAnnotation.keySet()) {
+				Object value = componentPropertyAnnotation.get(key);
+				m_logger.debug("ComponentPropertyTypeDataCollector: handle value %s %s", key, value);
+				handleValue(key, value, value instanceof TypeRef, null);
+			}
+		}
+	
+		@Override
+		public void classBegin(int access, TypeRef name) {
+			m_logger.debug("PropertyType: class begin %s", name);
+			typeRef = name;
+		}
+
+		@Override
+		public void field(FieldDef defined) {
+			m_logger.debug("PropertyType: field %s", defined);
+			if (defined.isStatic() && defined.getName().equals("PREFIX_")) {
+				prefixField = defined;
+			}
+		}
+	
+		@Override
+		public void method(MethodDef defined) {
+			m_logger.debug("PropertyType: method %s", defined);
+
+			if (defined.isStatic()) {
+				return;
+			}
+			hasMethods = true;
+			if (defined.getName().equals("value")) {
+				hasValue = true;
+			} else {
+				hasNoDefault++;
+			}
+		}
+	
+		@Override
+		public void annotationDefault(MethodDef defined, Object value) {
+			m_logger.debug("PropertyType: annotationDefault method %s value %s", defined, value);
+
+			if (!defined.getName().equals("value")) {
+				hasNoDefault--;
+			}
+			// check type, exit with warning if annotation
+			// or annotation array
+			boolean isClass = false;
+			Class< ? > typeClass = null;
+			TypeRef type = defined.getType().getClassRef();
+			if (!type.isPrimitive()) {
+				if (type == m_analyzer.getTypeRef("java/lang/Class")) {
+					isClass = true;
+				} else {
+					try {
+						Clazz r = m_analyzer.findClass(type);
+						if (r.isAnnotation()) {
+							m_logger.warn("Nested annotation type found in member %s, %s",
+									defined.getName(), type.getFQN());
+							return;
+						}
+					} catch (Exception e) {
+						m_logger.error("Exception looking at annotation type to lifecycle method with type %s", e, type);
+					}
+				}
+			} else {
+				m_logger.debug("PropertyType: type.getFQN()=%s", type.getFQN());
+				typeClass = m_types.get(type.getFQN());
+			}
+			if (value != null) {
+				String name = defined.getName();
+				// only add the default value if the user has not specified the property name
+				if (! props.containsKey(name)) {
+					handleValue(name, value, isClass, typeClass);
+				}
+			}
+		}
+	
+		private void handleValue(String name, Object value, boolean isClass, Class< ? > typeClass) {
+			if (value.getClass().isArray()) {
+				// add element individually
+				int len = Array.getLength(value);
+				for (int i = 0; i < len; i++) {
+					Object element = Array.get(value, i);
+					valueToProperty(name, element, isClass, typeClass);
+				}
+//				if (len == 1) {
+//					// To make sure the output is an array, we must make
+//					// sure there is more than one entry
+//					props.add(name, MARKER);
+//				}
+			} else {
+				valueToProperty(name, value, isClass, typeClass);
+			}
+		}
+		
+		@Override
+		public void classEnd() throws Exception {
+			m_logger.debug("PropertyType: classEnd");
+
+			String prefix = null;
+			if (prefixField != null) {
+				Object c = prefixField.getConstant();
+				if (prefixField.isFinal() && (prefixField.getType() == m_analyzer.getTypeRef("java/lang/String"))
+						&& (c instanceof String)) {
+					prefix = (String) c;
+				} else {
+					m_logger.warn(
+							"Field PREFIX_ in %s is not a static final String field with a compile-time constant value: %s",
+							typeRef.getFQN(), c);
+				}
+				m_logger.debug("PropertyType: classEnd prefix = %s", prefix);
+			}
+			
+			if (!hasMethods) {
+				// This is a marker annotation so treat it like it is a single
+				// element annotation with a value of Boolean.TRUE
+				hasValue = true;
+				handleValue("value", Boolean.TRUE, false, Boolean.class);
+			}
+			
+			String singleElementAnnotation = null;
+			if (hasValue && (hasNoDefault == 0)) {
+				m_logger.debug("PropertyType: classEnd hasValue && hasNoDefault == 0");
+
+				StringBuilder sb = new StringBuilder(typeRef.getShorterName());
+				boolean lastLowerCase = false;
+				for (int i = 0; i < sb.length(); i++) {
+					char c = sb.charAt(i);
+					if (Character.isUpperCase(c)) {
+						sb.setCharAt(i, Character.toLowerCase(c));
+						if (lastLowerCase) {
+							sb.insert(i++, '.');
+						}
+						lastLowerCase = false;
+					} else {
+						lastLowerCase = Character.isLowerCase(c);
+					}
+				}
+				singleElementAnnotation = sb.toString();
+				m_logger.debug("PropertyType: classEnd singleElementAnnotation=%s", singleElementAnnotation);
+			}
+			m_logger.debug("PropertyType: classEnd props=" + props);
+			for (Entry<String,List<String>> entry : props.entrySet()) {
+				String key = entry.getKey();
+				List<String> value = entry.getValue();
+				Class<?> type = propertyTypes.get(key);
+				if ((singleElementAnnotation != null) && key.equals("value")) {
+					key = singleElementAnnotation;
+				} else {
+					key = identifierToPropertyName(key);
+				}
+				if (prefix != null) {
+					key = prefix + key;
+				}	
+				
+				m_componentWriter.addProperty(key, value.toArray(), type);				
+				m_logger.info("PropertyType: parsed property key:%s, value:%s, type:%s", key, value, type);
+			}
+		}
+
+		private void valueToProperty(String name, Object value, boolean isClass, Class<?> typeClass) {
+			if (isClass)
+				value = ((TypeRef) value).getFQN();
+			if (typeClass == null)
+				typeClass = value.getClass();
+			// enums already come out as the enum name, no
+			// processing needed.
+			//String type = typeClass.getSimpleName();
+			String type = typeClass.getName();
+			propertyTypes.put(name, typeClass);
+			props.add(name, value.toString());
+		}
+	
+		private String identifierToPropertyName(String name) {
+		    name = derivePropertyNameUsingJavaBeanConvention(name);
+		    name = derivePropertyNameUsingCamelCaseConvention(name);
+		    name = derivePropertyNameUsingMetatypeConvention(name);
+			return name;
+		}
+		
+		// getFoo -> foo; isFoo -> foo
+        private String derivePropertyNameUsingJavaBeanConvention(String methodName) {
+            StringBuilder sb = new StringBuilder(methodName);
+            
+            if (methodName.startsWith("get")) {
+                sb.delete(0, 3);
+            } else if (methodName.startsWith("is")) {
+                sb.delete(0, 2);
+            }
+            
+            char c = sb.charAt(0);
+            if (Character.isUpperCase(c)) {
+                sb.setCharAt(0, Character.toLowerCase(c));
+            }
+            
+            return (sb.toString());
+        }
+        
+        // fooBarZoo -> foo.bar.zoo
+        private String derivePropertyNameUsingCamelCaseConvention(String methodName) {
+            StringBuilder sb = new StringBuilder(methodName);
+            for (int i = 0; i < sb.length(); i++) {
+                char c = sb.charAt(i);
+                if (Character.isUpperCase(c)) {
+                    // camel casing: replace fooBar -> foo.bar
+                    sb.setCharAt(i, Character.toLowerCase(c));
+                    sb.insert(i, ".");
+                }
+            }
+            return sb.toString();            
+        }
+        
+        // foo__bar -> foo_bar; foo_bar -> foo.bar
+        private String derivePropertyNameUsingMetatypeConvention(String name) {
+            Matcher m = IDENTIFIERTOPROPERTY.matcher(name);
+            StringBuffer b = new StringBuffer();
+            while (m.find()) {
+                String replace;
+                if (m.group(1) != null) // __ to _
+                    replace = "_";
+                else if (m.group(2) != null) // _ to .
+                    replace = ".";
+                else if (m.group(3) != null) { // $_$ to -
+                    replace = "-";
+                }
+                else if (m.group(4) != null) // $$ to $
+                    replace = "\\$";
+                else // $ removed.
+                    replace = "";
+                m.appendReplacement(b, replace);
+            }
+            m.appendTail(b);
+            return b.toString();
+        }        
+	}
+	
+    public static <K, V> Map.Entry<K, V> entry(K key, V value) {
+        return new AbstractMap.SimpleEntry<>(key, value);
+    }
+
 }

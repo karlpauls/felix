@@ -63,7 +63,12 @@ public enum Params
     bundleContextField, 
     dependencyManagerField, 
     componentField,
+    registrationField,
     registered, 
     unregistered,
-    configType
+    configType,
+    configTypes,
+    dereference,
+    scope,
+    bundle
 }

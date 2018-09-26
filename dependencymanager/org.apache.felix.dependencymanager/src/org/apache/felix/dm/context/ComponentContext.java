@@ -22,13 +22,13 @@ import java.util.Dictionary;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 
 import org.apache.felix.dm.Component;
 import org.apache.felix.dm.Logger;
+import org.osgi.annotation.versioning.ProviderType;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
-
-import aQute.bnd.annotation.ProviderType;
 
 /**
  * This interface is the entry point to the Component implementation context.
@@ -38,7 +38,7 @@ import aQute.bnd.annotation.ProviderType;
  * @author <a href="mailto:dev@felix.apache.org">Felix Project Team</a>
  */
 @ProviderType
-public interface ComponentContext extends Component {
+public interface ComponentContext<T extends Component<T>> extends Component<T> {
     /**
      * Returns the Component Executor gate that can be used to ensure proper component event serialization.
      * When you schedule a task in the component executor, your task is executed safely and you do not need
@@ -134,6 +134,16 @@ public interface ComponentContext extends Component {
     public void invokeCallbackMethod(Object[] instances, String methodName, Class<?>[][] signatures, Object[][] parameters, boolean logIfNotFound);
     
     /**
+     * Invokes a callback method on a given set of objects. An error is logged if the callback is not found in any of the object instances.
+     * @param instances the component instances
+     * @param methodName the method name
+     * @param signatures the method signatures (types)
+     * @param paramsSupplier the supplier for the method parameters
+     * @param logIfNotFound true if a warning message should be logged in case the callback is not found in any of the object instances.
+     */
+    public void invokeCallback(Object[] instances, String methodName, Class<?>[][] signatures, Supplier<?>[][] paramsSupplier, boolean logIfNotFound);
+
+    /**
      * Returns the component instances
      * @return the component instances
      */
@@ -177,5 +187,16 @@ public interface ComponentContext extends Component {
      * @param config the configuration to wrap, cannot be <code>null</code>.
      * @return an instance of the given type that wraps the given configuration.
      */
-    public <T> T createConfigurationType(Class<T> type, Dictionary<?, ?> config);
+    public <U> U createConfigurationType(Class<U> type, Dictionary<?, ?> config);
+                
+    /**
+     * Instantiates the component instances.
+     * @return this component context.
+     */   
+    public ComponentContext instantiateComponent();
+    
+    /**
+     * Indicates if the component fields and methods injections are disabled.
+     */
+    public boolean injectionDisabled();
 }

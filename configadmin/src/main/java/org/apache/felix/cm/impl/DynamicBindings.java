@@ -39,8 +39,7 @@ class DynamicBindings
 
     private final PersistenceManager persistenceManager;
 
-    private final Dictionary bindings;
-
+    private final Dictionary<String, String> bindings;
 
     DynamicBindings( BundleContext bundleContext, PersistenceManager persistenceManager ) throws IOException
     {
@@ -55,7 +54,7 @@ class DynamicBindings
             final Bundle[] bundles = bundleContext.getBundles();
             for ( int i = 0; i < bundles.length; i++ )
             {
-                locations.add( bundles[i].getLocation() );
+                locations.add( Activator.getLocation(bundles[i]) );
             }
 
             // collect pids whose location is not installed any more
@@ -63,7 +62,7 @@ class DynamicBindings
             for ( Enumeration ke = bindings.keys(); ke.hasMoreElements(); )
             {
                 final String pid = ( String ) ke.nextElement();
-                final String location = ( String ) bindings.get( pid );
+                final String location = bindings.get( pid );
                 if ( !locations.contains( location ) )
                 {
                     removedKeys.add( pid );
@@ -85,7 +84,7 @@ class DynamicBindings
         }
         else
         {
-            this.bindings = new Hashtable();
+            this.bindings = new Hashtable<>();
         }
 
     }
@@ -95,7 +94,7 @@ class DynamicBindings
     {
         synchronized ( this )
         {
-            return ( String ) this.bindings.get( pid );
+            return this.bindings.get( pid );
         }
     }
 

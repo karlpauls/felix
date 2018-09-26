@@ -69,22 +69,15 @@ public class AspectServiceBuilder extends AbstractBuilder
         Component c;
         if (field != null)
         {
-            c = dm.createAspectService(serviceInterface, serviceFilter, ranking, field)
+            c = dm.createAspectComponent()
+                  .setAspect(serviceInterface, serviceFilter, ranking)
+                  .setAspectField(field)
                   .setServiceProperties(aspectProperties);
         } 
         else
         {
-            if (added != null || changed != null || removed != null || swap != null)
-            {
-                c = dm.createAspectService(serviceInterface, serviceFilter, ranking, added, changed, removed, swap)
-                      .setServiceProperties(aspectProperties);
-            } 
-            else
-            {
-                c = dm.createAspectService(serviceInterface, serviceFilter, ranking)
-                      .setServiceProperties(aspectProperties);
-            }
- 
+        	c = dm.createAspectService(serviceInterface, serviceFilter, ranking, null, added, changed, removed, swap)
+        		  .setServiceProperties(aspectProperties); 
         }
         
         setCommonServiceParams(c, srvMeta);

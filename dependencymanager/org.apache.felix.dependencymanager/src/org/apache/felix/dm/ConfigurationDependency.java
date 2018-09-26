@@ -22,7 +22,7 @@ import java.util.Collection;
 import java.util.Dictionary;
 import java.util.Map;
 
-import aQute.bnd.annotation.ProviderType;
+import org.osgi.annotation.versioning.ProviderType;
 
 /**
  * Configuration dependency that can track the availability of a (valid) configuration. To use
@@ -49,10 +49,13 @@ import aQute.bnd.annotation.ProviderType;
  * </ul>
  * 
  * <p> The callback invoked when a configuration dependency is updated can supports the following signatures:<p>
- * <ul><li> updated(Dictionary)
- *     <li> updated(Component, Dictionary)
- *     <li> updated(ConfigurationType)
- *     <li> updated(Component, ConfigurationType)
+ * <ul>
+ * <li>callback(Dictionary) 
+ * <li>callback(Component, Dictionary) 
+ * <li>callback(Component, Configuration ... configTypes) // type safe configuration interface(s)
+ * <li>callback(Configuration ... configTypes) // type safe configuration interface(s)
+ * <li>callback(Dictionary, Configuration ... configTypes) // type safe configuration interfaces(s)
+ * <li>callback(Component, Dictionary, Configuration ... configTypes) // type safe configuration interfaces(s)
  * </ul>
  * 
  * <p> Support for a custom Configuration type is a new feature that allows you to specify an interface that is implemented 
@@ -69,8 +72,19 @@ import aQute.bnd.annotation.ProviderType;
  * "mangled" to the following form: <tt>[lower case letter] [any valid character]*</tt>. Method names starting with
  * <tt>get</tt> or <tt>is</tt> (JavaBean convention) are stripped from these prefixes. For example: given a dictionary
  * with the key <tt>"foo"</tt> can be accessed from a configuration-type using the following method names:
- * <tt>foo()</tt>, <tt>getFoo()</tt> and <tt>isFoo()</tt>.
- * </p>
+ * <tt>foo()</tt>, <tt>getFoo()</tt> and <tt>isFoo()</tt>.<p> 
+ * 
+ * If the property contains a dot (which is invalid in java method names), then dots (".") can be converted using the following conventions: 
+ * <ul>
+ * 
+ * <li> if the method name follows the javabean convention and/or kamel casing convention, then each capital letter is assumed to map to a "dot", 
+ * followed by the same letter in lower case. This means only lower case properties are 
+ * supported in this case. Example: getFooBar() or fooBar() will map to "foo.bar" property.
+ * 
+ * <li> else, if the method name follows the standard OSGi metatype specification, then dots  
+ * are encoded as "_"; and "_" is encoded as "__". (see OSGi r6 compendium, chapter 105.9.2).
+ * Example: "foo_BAR()" is mapped to "foo.BAR" property; "foo__BAR_zoo()" is mapped to "foo_BAR.zoo" property.
+ * </ul>
  * <p>
  * The return values supported are: primitive types (or their object wrappers), strings, enums, arrays of
  * primitives/strings, {@link Collection} types, {@link Map} types, {@link Class}es and interfaces. When an interface is
@@ -96,7 +110,6 @@ import aQute.bnd.annotation.ProviderType;
  * result in the same map being returned.
  * Instead of a map, you could also define an interface with the methods <tt>getKey1()</tt> and <tt>getKey2</tt> and use
  * that interface as return type instead of a {@link Map}.
- * </p>
  * <p>
  * In case a lookup does not yield a value from the underlying map or dictionary, the following rules are applied:
  * <ol>
@@ -105,7 +118,7 @@ import aQute.bnd.annotation.ProviderType;
  * <li>for arrays, collections and maps, an empty array/collection/map is returned;
  * <li>for other interface types that are treated as configuration type a null-object is returned.
  * </ol>
- * </p>
+ * <p>
  * @author <a href="mailto:dev@felix.apache.org">Felix Project Team</a>
  */
 @ProviderType
@@ -201,14 +214,24 @@ public interface ConfigurationDependency extends Dependency, ComponentDependency
     /**
      * Sets propagation of the configuration properties to the service
      * properties. Any additional service properties specified directly are
-     * merged with these.
+     * merged with these. Configuration properties are not propagated by default.
+     * When configuration are propagated, any service properties will be overriden by configuration properties,
+     * unless you invoke <code>setPropagateOverride(false)</code> method.
      */
 	ConfigurationDependency setPropagate(boolean propagate);
 
     /**
+     * Sets propagation of the configuration properties to the service
+     * properties. Any additional service properties specified directly are
+     * merged with these. Configuration properties are not propagated by default.
+     * When configuration are propagated, any service properties will be overriden by configuration properties,
+     * unless you use <code>overrideServiceProperties</code> parameter with a false value.
+     */
+	ConfigurationDependency setPropagate(boolean propagate, boolean overrideServiceProperties);
+
+	/**
      * The label used to display the tab name (or section) where the properties
      * are displayed. Example: "Printer Service".
-     * 
      * @return The label used to display the tab name where the properties are
      *         displayed (may be localized)
      */
@@ -239,7 +262,7 @@ public interface ConfigurationDependency extends Dependency, ComponentDependency
      * Adds a MetaData regarding a given configuration property.
      */
 	ConfigurationDependency add(PropertyMetaData properties);
-	
+		
     /**
      * Sets the required flag which determines if this configuration dependency is required or not.
      * A configuration dependency is required by default.
@@ -248,4 +271,18 @@ public interface ConfigurationDependency extends Dependency, ComponentDependency
      * @return this service dependency
      */
 	ConfigurationDependency setRequired(boolean required);
+	
+	/**
+	 * Specifies if the component instance should be instantiated when this dependency is started.
+	 * The component is always instantiated when a Configuration dependency is defined, except
+	 * if you set a callback instance or if you invoke this method with <code>false</code>
+	 */
+	ConfigurationDependency needsInstance(boolean needsInstance);
+	
+    /**
+     * Sets the configuration property type(s) that are passed to the updated callback parameters
+     * 
+     * @param configType the configuration type(s) that the callback method accepts.
+     */
+    ConfigurationDependency setConfigType(Class<?> ... configType);
 }

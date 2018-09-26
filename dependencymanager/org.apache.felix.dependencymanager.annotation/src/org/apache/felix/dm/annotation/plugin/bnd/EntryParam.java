@@ -45,6 +45,7 @@ public enum EntryParam
     pid,
     pidClass,
     configType, // inject a proxy configuration type 
+    configTypes, // inject multiple proxy configuration type interfaces 
     factoryPid,
     factoryPidClass,
     propagate, 
@@ -65,6 +66,10 @@ public enum EntryParam
     bundleContextField, 
     dependencyManagerField, 
     componentField, 
+    registrationField, 
     registered, 
-    unregistered
+    unregistered,
+    dereference,
+    scope,
+    bundle
 }

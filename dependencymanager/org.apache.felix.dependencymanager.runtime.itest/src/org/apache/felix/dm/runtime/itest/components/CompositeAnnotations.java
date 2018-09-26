@@ -36,6 +36,7 @@ import org.osgi.framework.ServiceRegistration;
 /**
  * @author <a href="mailto:dev@felix.apache.org">Felix Project Team</a>
  */
+@SuppressWarnings("rawtypes")
 public class CompositeAnnotations {
     public interface C1Service {
     }
@@ -158,7 +159,8 @@ public class CompositeAnnotations {
         }
     }
 
-    @Component(properties = @Property(name = "foo", value = "bar1"))
+    @Component
+    @Property(name = "foo", value = "bar1")
     public static class Dependency1 implements Dependency {
         public final static String ENSURE = "CompositeAnnotations.Dependency1";
 
@@ -175,7 +177,8 @@ public class CompositeAnnotations {
         }
     }
 
-    @Component(properties = @Property(name = "foo", value = "bar2"))
+    @Component
+    @Property(name = "foo", value = "bar2")
     public static class Dependency2 implements Dependency {
         public final static String ENSURE = "CompositeAnnotations.Dependency2";
 

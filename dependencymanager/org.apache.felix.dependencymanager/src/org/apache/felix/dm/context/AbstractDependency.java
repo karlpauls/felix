@@ -109,6 +109,11 @@ public abstract class AbstractDependency<T extends Dependency> implements
      * Tells if the dependency service properties have to be propagated to the Component service properties.
      */
     protected volatile boolean m_propagate;
+    
+    /**
+      * Tells if the dependency service properties should override default component service properties (false by default).
+      */
+    protected volatile boolean m_propagateOverrides;
 
     /**
      * The propagate callback instance that is invoked in order to supply dynamically some dependency service properties.
@@ -149,6 +154,7 @@ public abstract class AbstractDependency<T extends Dependency> implements
         m_propagate = prototype.m_propagate;
         m_propagateCallbackInstance = prototype.m_propagateCallbackInstance;
         m_propagateCallbackMethod = prototype.m_propagateCallbackMethod;
+        m_propagateOverrides = prototype.m_propagateOverrides;
     }
     
     @Override
@@ -198,6 +204,11 @@ public abstract class AbstractDependency<T extends Dependency> implements
     public boolean isPropagated() {
         return m_propagate;
     }
+    
+    @Override
+    public boolean overrideServiceProperties() {
+    	return m_propagateOverrides;
+    }
 
     /**
      * Returns the dependency service properties (empty by default).
@@ -243,6 +254,7 @@ public abstract class AbstractDependency<T extends Dependency> implements
     @Override
     public void stop() {
         m_isStarted = false;
+        m_available = false;
     }
 
     /**
@@ -406,6 +418,14 @@ public abstract class AbstractDependency<T extends Dependency> implements
         m_propagate = propagate;
         return (T) this;
     }
+    
+    @SuppressWarnings("unchecked")
+    public T setPropagate(boolean propagate, boolean overrideServiceProperties) {
+        ensureNotActive();
+        m_propagate = propagate;
+        m_propagateOverrides = overrideServiceProperties;
+        return (T) this;
+    }
 
     /**
      * Sets a callback instance which can ba invoked with the given method in order to dynamically retrieve the 
@@ -422,7 +442,7 @@ public abstract class AbstractDependency<T extends Dependency> implements
         m_propagateCallbackMethod = method;
         return (T) this;
     }
-
+        
     /**
      * Sets the add/remove callbacks.
      * @param add the callback to invoke when a dependency is added

@@ -18,9 +18,10 @@
 */
 package org.apache.felix.dm.runtime.itest.components;
 
+import java.util.Dictionary;
 import java.util.HashMap;
+import java.util.Hashtable;
 import java.util.Map;
-import java.util.Properties;
 
 import org.apache.felix.dm.annotation.api.Component;
 import org.apache.felix.dm.annotation.api.Destroy;
@@ -48,7 +49,8 @@ public class Felix4050 {
         void run();
     }
 
-    @Component(properties = {@Property(name = "type", value = "b1")})
+    @Component
+    @Property(name = "type", value = "b1")
     public static class B1 implements B {
         public void run() {
         }
@@ -71,7 +73,7 @@ public class Felix4050 {
                     } catch (InterruptedException e) {
                     }
                     System.out.println("Registering B2");
-                    Properties props = new Properties();
+                    Dictionary<String, Object> props = new Hashtable<>();
                     props.put("type", "b2");
                     _ctx.registerService(B.class.getName(), B2.this, props);
 

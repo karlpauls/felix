@@ -26,6 +26,10 @@ import java.util.stream.Stream;
 
 import org.apache.felix.dm.Component;
 import org.apache.felix.dm.lambda.ServiceCallbacksBuilder;
+import org.apache.felix.dm.lambda.callbacks.CbRef;
+import org.apache.felix.dm.lambda.callbacks.CbRefComponent;
+import org.apache.felix.dm.lambda.callbacks.CbRefRef;
+import org.apache.felix.dm.lambda.callbacks.CbRefRefComponent;
 import org.apache.felix.dm.lambda.callbacks.CbRefServiceRefService;
 import org.apache.felix.dm.lambda.callbacks.CbRefServiceRefServiceComponent;
 import org.apache.felix.dm.lambda.callbacks.CbService;
@@ -33,9 +37,15 @@ import org.apache.felix.dm.lambda.callbacks.CbServiceComponent;
 import org.apache.felix.dm.lambda.callbacks.CbServiceComponentRef;
 import org.apache.felix.dm.lambda.callbacks.CbServiceDict;
 import org.apache.felix.dm.lambda.callbacks.CbServiceMap;
+import org.apache.felix.dm.lambda.callbacks.CbServiceObjects;
+import org.apache.felix.dm.lambda.callbacks.CbServiceObjectsServiceObjects;
 import org.apache.felix.dm.lambda.callbacks.CbServiceRef;
 import org.apache.felix.dm.lambda.callbacks.CbServiceService;
 import org.apache.felix.dm.lambda.callbacks.CbServiceServiceComponent;
+import org.apache.felix.dm.lambda.callbacks.InstanceCbRef;
+import org.apache.felix.dm.lambda.callbacks.InstanceCbRefComponent;
+import org.apache.felix.dm.lambda.callbacks.InstanceCbRefRef;
+import org.apache.felix.dm.lambda.callbacks.InstanceCbRefRefComponent;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbRefServiceRefService;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbRefServiceRefServiceComponent;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbService;
@@ -43,6 +53,8 @@ import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceComponent;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceComponentRef;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceDict;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceMap;
+import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceObjects;
+import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceObjectsServiceObjects;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceRef;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceService;
 import org.apache.felix.dm.lambda.callbacks.InstanceCbServiceServiceComponent;
@@ -81,6 +93,11 @@ public class ServiceCallbacksBuilderImpl<S, B extends ServiceCallbacksBuilder<S,
 	 * List of swap callbacks
 	 */
 	protected final List<SwapMethodRef<?, S>> m_swapRefs = new ArrayList<>();
+	
+	/**
+	 * Indicates if the service must always be internally deference by dependency manager.
+	 */
+	protected boolean m_dereferenceServiceInternally = true;
 	
 	/**
 	 * This interface (lambda) is called when we want to invoke a method reference. the lambda is called with all necessary service dependency 
@@ -148,7 +165,13 @@ public class ServiceCallbacksBuilderImpl<S, B extends ServiceCallbacksBuilder<S,
         
     public B swap(String swap) {
         return callbacks(null, null, null, swap);
-    }
+    }    
+
+	@Override
+	public B dereference(boolean dereferenceServiceInternally) {
+		m_dereferenceServiceInternally = dereferenceServiceInternally; 
+		return (B) this;
+	}   
         
     private B callbacks(String added, String changed, String removed, String swapped) {
 		requiresNoMethodRefs();
@@ -336,6 +359,52 @@ public class ServiceCallbacksBuilderImpl<S, B extends ServiceCallbacksBuilder<S,
         return (B) this;
     }
     
+    public B add(InstanceCbRef<S> add) {
+        return callbacks(add, null, null);
+    }
+
+    public B change(InstanceCbRef<S> change) {
+        return callbacks(null, change, null);
+    }
+
+    public B remove(InstanceCbRef<S> remove) {
+        return callbacks(null, null, remove);
+    }
+
+    public B callbacks(InstanceCbRef<S> add, InstanceCbRef<S> change, InstanceCbRef<S> remove) {
+        if (add != null)
+            setInstanceCallbackRef(Cb.ADD, (inst, comp, ref, srv) -> add.accept(ref)); 
+        if (change != null)
+            setInstanceCallbackRef(Cb.CHG, (inst, comp, ref, srv) -> change.accept(ref)); 
+        if (remove != null)
+            setInstanceCallbackRef(Cb.REM, (inst, comp, ref, srv) -> remove.accept(ref));
+        m_dereferenceServiceInternally = false;
+        return (B) this;
+    }
+    
+    public B add(InstanceCbServiceObjects<S> add) {
+        return callbacks(add, null, null);
+    }
+
+    public B change(InstanceCbServiceObjects<S> change) {
+        return callbacks(null, change, null);
+    }
+
+    public B remove(InstanceCbServiceObjects<S> remove) {
+        return callbacks(null, null, remove);
+    }
+
+    public B callbacks(InstanceCbServiceObjects<S> add, InstanceCbServiceObjects<S> change, InstanceCbServiceObjects<S> remove) {
+        if (add != null)
+            setInstanceCallbackRef(Cb.ADD, (inst, comp, ref, srv) -> add.accept(ref.getBundle().getBundleContext().getServiceObjects(ref))); 
+        if (change != null)
+            setInstanceCallbackRef(Cb.CHG, (inst, comp, ref, srv) -> change.accept(ref.getBundle().getBundleContext().getServiceObjects(ref))); 
+        if (remove != null)
+            setInstanceCallbackRef(Cb.REM, (inst, comp, ref, srv) -> remove.accept(ref.getBundle().getBundleContext().getServiceObjects(ref)));
+        m_dereferenceServiceInternally = false;
+        return (B) this;
+    }
+
     public <T> B add(CbServiceComponent<T, S>  add) {
         return callbacks(add, null, null);
     }
@@ -402,6 +471,77 @@ public class ServiceCallbacksBuilderImpl<S, B extends ServiceCallbacksBuilder<S,
         return (B) this;
     }
 
+    public <T> B add(CbRef<T, S>  add) {
+        return callbacks(add, null, null);
+    }
+
+    public <T> B change(CbRef<T, S>  change) {
+        return callbacks(null, change, null);
+    }
+
+    public <T> B remove(CbRef<T, S>  remove) {
+        return callbacks(null, null, remove);
+    }
+
+    private <T> B callbacks(CbRef<T, S>  add, CbRef<T, S>  change, CbRef<T, S>  remove) {
+        if (add != null)
+            setComponentCallbackRef(Cb.ADD, Helpers.getLambdaArgType(add, 0), (inst, comp, ref, srv) -> add.accept((T) inst, ref)); 
+        if (change != null)
+            setComponentCallbackRef(Cb.CHG, Helpers.getLambdaArgType(change, 0), (inst, comp, ref, srv) -> change.accept((T) inst, ref)); 
+        if (remove != null)
+            setComponentCallbackRef(Cb.REM, Helpers.getLambdaArgType(remove, 0), (inst, comp, ref, srv) -> remove.accept((T) inst, ref));
+        m_dereferenceServiceInternally = false;
+        return (B) this;
+    }
+
+    public <T> B add(CbServiceObjects<T, S>  add) {
+        return callbacks(add, null, null);
+    }
+
+    public <T> B change(CbServiceObjects<T, S>  change) {
+        return callbacks(null, change, null);
+    }
+
+    public <T> B remove(CbServiceObjects<T, S>  remove) {
+        return callbacks(null, null, remove);
+    }
+
+    private <T> B callbacks(CbServiceObjects<T, S>  add, CbServiceObjects<T, S>  change, CbServiceObjects<T, S>  remove) {
+        if (add != null)
+            setComponentCallbackRef(Cb.ADD, Helpers.getLambdaArgType(add, 0), (inst, comp, ref, srv) -> add.accept((T) inst, 
+            		ref.getBundle().getBundleContext().getServiceObjects(ref))); 
+        if (change != null)
+            setComponentCallbackRef(Cb.CHG, Helpers.getLambdaArgType(change, 0), (inst, comp, ref, srv) -> change.accept((T) inst, 
+            		ref.getBundle().getBundleContext().getServiceObjects(ref))); 
+        if (remove != null)
+            setComponentCallbackRef(Cb.REM, Helpers.getLambdaArgType(remove, 0), (inst, comp, ref, srv) -> remove.accept((T) inst, 
+            		ref.getBundle().getBundleContext().getServiceObjects(ref)));
+        m_dereferenceServiceInternally = false;
+        return (B) this;
+    }
+    
+    public <T> B add(CbRefComponent<T, S>  add) {
+        return callbacks(add, null, null);
+    }
+
+    public <T> B change(CbRefComponent<T, S>  change) {
+        return callbacks(null, change, null);
+    }
+
+    public <T> B remove(CbRefComponent<T, S>  remove) {
+        return callbacks(null, null, remove);
+    }
+
+    private <T> B callbacks(CbRefComponent<T, S>  add, CbRefComponent<T, S>  change, CbRefComponent<T, S>  remove) {
+        if (add != null)
+            setComponentCallbackRef(Cb.ADD, Helpers.getLambdaArgType(add, 0), (inst, comp, ref, srv) -> add.accept((T) inst, ref, comp)); 
+        if (change != null)
+            setComponentCallbackRef(Cb.CHG, Helpers.getLambdaArgType(change, 0), (inst, comp, ref, srv) -> change.accept((T) inst, ref, comp)); 
+        if (remove != null)
+            setComponentCallbackRef(Cb.REM, Helpers.getLambdaArgType(remove, 0), (inst, comp, ref, srv) -> remove.accept((T) inst, ref, comp));
+        return (B) this;
+    }
+
     public B add(InstanceCbServiceComponentRef<S> add) {
         return callbacks(add, null, null);
     }
@@ -424,10 +564,49 @@ public class ServiceCallbacksBuilderImpl<S, B extends ServiceCallbacksBuilder<S,
         return (B) this;
     }
 
+    public B add(InstanceCbRefComponent<S> add) {
+        return callbacks(add, null, null);
+    }
+
+    public B change(InstanceCbRefComponent<S> change) {
+        return callbacks(null, change, null);
+    }
+
+    public B remove(InstanceCbRefComponent<S> remove) {
+        return callbacks(null, null, remove);
+    }
+
+    public B callbacks(InstanceCbRefComponent<S> add, InstanceCbRefComponent<S> change, InstanceCbRefComponent<S> remove) {
+        if (add != null)
+            setInstanceCallbackRef(Cb.ADD, (inst, comp, ref, srv) -> add.accept(ref, comp));
+        if (change != null)
+            setInstanceCallbackRef(Cb.CHG, (inst, comp, ref, srv) -> change.accept(ref, comp));
+        if (remove != null)
+            setInstanceCallbackRef(Cb.REM, (inst, comp, ref, srv) -> remove.accept(ref, comp));
+        m_dereferenceServiceInternally = false;
+        return (B) this;
+    }
+
     public <T> B swap(CbServiceService<T, S> swap) {
         Class<T> type = Helpers.getLambdaArgType(swap, 0);
         return setComponentSwapCallbackRef(type, (inst, component, oref, oserv, nref, nserv) ->
             swap.accept((T) inst, oserv, nserv));                              
+    }
+
+    public <T> B swap(CbRefRef<T, S> swap) {
+        Class<T> type = Helpers.getLambdaArgType(swap, 0);
+        m_dereferenceServiceInternally = false;
+        return setComponentSwapCallbackRef(type, (inst, component, oref, oserv, nref, nserv) ->
+            swap.accept((T) inst, oref, nref));                              
+    }
+
+    public <T> B swap(CbServiceObjectsServiceObjects<T, S> swap) {
+        Class<T> type = Helpers.getLambdaArgType(swap, 0);
+        m_dereferenceServiceInternally = false;
+        return setComponentSwapCallbackRef(type, (inst, component, oref, oserv, nref, nserv) ->
+            swap.accept((T) inst, 
+            		oref.getBundle().getBundleContext().getServiceObjects(oref), 
+            		nref.getBundle().getBundleContext().getServiceObjects(nref)));                              
     }
 
     @Override
@@ -435,6 +614,14 @@ public class ServiceCallbacksBuilderImpl<S, B extends ServiceCallbacksBuilder<S,
         Class<T> type = Helpers.getLambdaArgType(swap, 0);
         return setComponentSwapCallbackRef(type, (inst, component, oref, oserv, nref, nserv) ->
             swap.accept((T) inst, oserv, nserv, component));                              
+    }
+
+    @Override
+    public <T> B swap(CbRefRefComponent<T, S> swap) {
+        Class<T> type = Helpers.getLambdaArgType(swap, 0);
+        m_dereferenceServiceInternally = false;
+        return setComponentSwapCallbackRef(type, (inst, component, oref, oserv, nref, nserv) ->
+            swap.accept((T) inst, oref, nref, component));                              
     }
 
     public <T> B swap(CbRefServiceRefService<T, S> swap) {
@@ -453,8 +640,25 @@ public class ServiceCallbacksBuilderImpl<S, B extends ServiceCallbacksBuilder<S,
         return setInstanceSwapCallbackRef((inst, component, oref, oserv, nref, nserv) -> swap.accept(oserv, nserv));
     }
 
+    public B swap(InstanceCbRefRef<S> swap) {
+        m_dereferenceServiceInternally = false;
+        return setInstanceSwapCallbackRef((inst, component, oref, oserv, nref, nserv) -> swap.accept(oref, nref));
+    }
+
+    public B swap(InstanceCbServiceObjectsServiceObjects<S> swap) {
+        m_dereferenceServiceInternally = false;
+        return setInstanceSwapCallbackRef((inst, component, oref, oserv, nref, nserv) -> 
+        swap.accept(oref.getBundle().getBundleContext().getServiceObjects(oref), 
+        		nref.getBundle().getBundleContext().getServiceObjects(nref)));
+    }
+
     public B swap(InstanceCbServiceServiceComponent<S> swap) {
         return setInstanceSwapCallbackRef((inst, component, oref, oserv, nref, nserv) -> swap.accept(oserv, nserv, component));
+    }
+
+    public B swap(InstanceCbRefRefComponent<S> swap) {
+        m_dereferenceServiceInternally = false;
+        return setInstanceSwapCallbackRef((inst, component, oref, oserv, nref, nserv) -> swap.accept(oref, nref, component));
     }
 
     public B swap(InstanceCbRefServiceRefService<S> swap) {
@@ -512,27 +716,43 @@ public class ServiceCallbacksBuilderImpl<S, B extends ServiceCallbacksBuilder<S,
      }
     
     Object createCallbackInstance() {
-       Object cb = null;
-       
-       cb = new Object() {
-           void add(Component c, ServiceReference<S> ref, Object service) {
-               invokeMethodRefs(Cb.ADD, c, ref, (S) service);
-           }
+    	if (m_dereferenceServiceInternally) {
+    		return new Object() {
+    			void add(Component c, ServiceReference<S> ref, Object service) {
+    				invokeMethodRefs(Cb.ADD, c, ref, (S) service);
+    			}
+    	   
+    			void change(Component c, ServiceReference<S> ref, Object service) {
+    				invokeMethodRefs(Cb.CHG, c, ref, (S) service);
+    			}
 
-           void change(Component c, ServiceReference<S> ref, Object service) {
-               invokeMethodRefs(Cb.CHG, c, ref, (S) service);
-           }
+    			void remove(Component c, ServiceReference<S> ref, Object service) {
+    				invokeMethodRefs(Cb.REM, c, ref, (S) service);
+    			}
 
-           void remove(Component c, ServiceReference<S> ref, Object service) {
-               invokeMethodRefs(Cb.REM, c, ref, (S) service);
-           }
+    			void swap(Component c, ServiceReference<S> oldRef, Object oldSrv, ServiceReference<S> newRef, Object newSrv) {
+    				invokeSwapMethodRefs(c, oldRef, (S) oldSrv, newRef, (S) newSrv);
+    			}
+    		};
+    	} else {
+    		return new Object() {
+    			void add(Component c, ServiceReference<S> ref) {
+    				invokeMethodRefs(Cb.ADD, c, ref, null);
+    			}
+    	   
+    			void change(Component c, ServiceReference<S> ref) {
+    				invokeMethodRefs(Cb.CHG, c, ref, null);
+    			}
 
-           void swap(Component c, ServiceReference<S> oldRef, Object oldSrv, ServiceReference<S> newRef, Object newSrv) {                
-               invokeSwapMethodRefs(c, oldRef, (S) oldSrv, newRef, (S) newSrv);
-           }
-       };
+    			void remove(Component c, ServiceReference<S> ref) {
+    				invokeMethodRefs(Cb.REM, c, ref, null);
+    			}
 
-       return cb;
+    			void swap(Component c, ServiceReference<S> oldRef, ServiceReference<S> newRef) {
+    				invokeSwapMethodRefs(c, oldRef, null, newRef, null);
+    			}
+    		};    		
+    	}
     }
     
     boolean hasRefs() {
