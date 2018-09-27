@@ -57,7 +57,7 @@
                 org.osgi.resource.dto;-split-package:=first,                
                 org.osgi.service.packageadmin;-split-package:=first,
                 org.osgi.service.startlevel;-split-package:=first,
-	        org.osgi.service.url;-split-package:=first,
+                org.osgi.service.url;-split-package:=first,
                 org.osgi.service.resolver,
                 org.osgi.util.tracker;-split-package:=first,
                 org.osgi.dto;-split-package:=first
