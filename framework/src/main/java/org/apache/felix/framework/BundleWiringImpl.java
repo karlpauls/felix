@@ -1959,7 +1959,8 @@ public class BundleWiringImpl implements BundleWiring
         {
             List<String> paths = new ArrayList<String>();
             List<Content> contentPath = wiring.m_revision.getContentPath();
-            for (Content content : contentPath) {
+            for (Content content : contentPath)
+            {
                 if (content instanceof MultiReleaseContent)
                 {
                     content = ((MultiReleaseContent) content).getWrappedContent();
@@ -1970,15 +1971,19 @@ public class BundleWiringImpl implements BundleWiring
                 }
             }
             String path;
-            if (paths.isEmpty()) {
-                path = null;
+            if (paths.isEmpty())
+            {
+                path = "";
             }
-            else if (paths.size() == 1) {
+            else if (paths.size() == 1)
+            {
                 path = paths.get(0);
             }
-            else {
+            else
+            {
                 path = paths.get(0);
-                for (int i = 1; i < paths.size();i++) {
+                for (int i = 1; i < paths.size();i++)
+                {
                     path += File.pathSeparator + paths.get(i);
                 }
             }
@@ -1988,7 +1993,7 @@ public class BundleWiringImpl implements BundleWiring
         private static String calculateLibraryPath(BundleWiringImpl wiring)
         {
             List<NativeLibrary> libs = wiring.getNativeLibraries();
-            List<String> paths = new ArrayList<String>();
+            Set<String> paths = new LinkedHashSet<String>();
             for (int libIdx = 0; (libs != null) && (libIdx < libs.size()); libIdx++)
             {
                 // Search bundle content first for native library.
@@ -2003,21 +2008,27 @@ public class BundleWiringImpl implements BundleWiring
                     result = wiring.m_fragmentContents.get(i).getEntryAsNativeLibrary(
                         libs.get(libIdx).getEntryName());
                 }
-                if (result != null) {
-                    paths.add(result);
+                if (result != null) 
+                {
+                    paths.add(new File(result).getParentFile().getAbsolutePath());
                 }
             }
             String nativePath;
-            if (paths.isEmpty()) {
+            if (paths.isEmpty())
+            {
                 nativePath = null;
             }
-            else if (paths.size() == 1) {
-                nativePath = paths.get(0);
+            else if (paths.size() == 1)
+            {
+                nativePath = paths.iterator().next();
             }
-            else {
-                nativePath = paths.get(0);
-                for (int i = 1; i < paths.size();i++) {
-                    nativePath += File.pathSeparator + paths.get(i);
+            else
+            {
+                Iterator<String> iter = paths.iterator();
+                nativePath = iter.next();
+                while (iter.hasNext())
+                {
+                    nativePath += File.pathSeparator + iter.next();
                 }
             }
             return nativePath;
