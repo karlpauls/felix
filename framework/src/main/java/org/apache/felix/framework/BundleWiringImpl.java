@@ -734,14 +734,22 @@ public class BundleWiringImpl implements BundleWiring
         // is not disposed.
         if (!m_isDisposed && (m_classLoader == null))
         {
-            m_classLoader = BundleRevisionImpl.getSecureAction().run(
+            m_classLoader = m_noDex ? BundleRevisionImpl.getSecureAction().run(
                 new PrivilegedAction<ClassLoader>()
                 {
                     @Override
                     public ClassLoader run()
                     {
-                        return m_noDex ? new BundleClassLoaderImpl(BundleWiringImpl.this, determineParentClassLoader(), m_logger) :
-                            new BundleClassLoaderDalvik(BundleWiringImpl.this, determineParentClassLoader(), m_logger);
+                        return new BundleClassLoaderImpl(BundleWiringImpl.this, determineParentClassLoader(), m_logger);
+                    }
+                }
+            ) : BundleRevisionImpl.getSecureAction().run(
+                new PrivilegedAction<ClassLoader>()
+                {
+                    @Override
+                    public ClassLoader run()
+                    {
+                        return new BundleClassLoaderDalvik(BundleWiringImpl.this, determineParentClassLoader(), m_logger);
                     }
                 }
             );
